@@ -1,0 +1,23 @@
+# Build output
+dist/
+
+# Generated Astro files
+.astro/
+akkaradb-native/.astro/
+
+# Dependencies
+node_modules/
+akkaradb-native/node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db

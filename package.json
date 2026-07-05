@@ -1,0 +1,9 @@
+{
+  "name": "swiftstorm-studio-document",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev:akkaradb-native": "npm --prefix akkaradb-native run dev -- --host 127.0.0.1 --port 4321"
+  }
+}
