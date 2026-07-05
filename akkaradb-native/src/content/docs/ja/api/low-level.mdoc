@@ -107,6 +107,8 @@ WAL のデフォルト同期モードは `SYNC`（強固な永続化）です。
 
 MemTable、SST、Blob、バージョン履歴、API サーバー、クラスタ関連を含む設定項目の全体像は、[低レベル API の設定オプション](/akkaradb-native/ja/api/low-level/options/) に分けています。
 
+同じエンジンを HTTP、TCP、gRPC から扱えるようにする場合は、[低レベル API の API サーバー](/akkaradb-native/ja/api/low-level/api-server/) に分けています。
+
 ## 基本的な CRUD 操作
 
 `put()` は指定したキーで値を書き込み、すでに同一キーが存在する場合は上書きします。`remove()` は対象キーに削除マーカー（Tombstone）を書き込みます。最も標準的な読み取り API である `get()` の戻り値は `std::optional<std::vector<uint8_t>>` です。

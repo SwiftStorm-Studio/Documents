@@ -34,9 +34,15 @@ export default defineConfig({
 							label: 'Low-Level API',
 							translations: { ja: '低レベル API' },
 							items: [
-								{ label: 'Guide', translations: { ja: 'ガイド' }, slug: 'api/low-level' },
-								{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
-								{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
+								{
+									label: 'AkkEngine',
+									items: [
+										{ label: 'Core Usage', translations: { ja: '基本操作' }, slug: 'api/low-level' },
+										{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
+										{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
+										{ label: 'API Server', translations: { ja: 'API サーバー' }, slug: 'api/low-level/api-server' },
+									],
+								},
 							],
 						},
 					],

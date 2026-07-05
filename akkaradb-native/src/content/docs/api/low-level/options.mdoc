@@ -149,17 +149,69 @@ Cluster support is intentionally separate from the local embedded path. Keep `co
 
 ## API Server Options
 
-`components.apiEnabled` starts one or more server transports from `api.backends`.
+`components.apiEnabled` starts one or more server transports from `api.backends`. Keep this disabled when the process calls `AkkEngine` directly and does not expose a network boundary.
 
-| Field group | Main fields |
+| Field | Meaning |
 |---|---|
-| Backend selection | `api.backends`, `api.serverBackendPath`, `api.httpBackendPath`, `api.tcpBackendPath`, `api.grpcBackendPath`, `api.transportBackendPath` |
-| HTTP | `api.bindHost`, `api.httpPort`, `api.httpMaxBatchItems`, `api.httpMaxScanItems`, `api.httpMaxHistoryEntries`, `api.httpMaxContentLength` |
-| TCP | `api.tcpPort`, `api.tcpIoBackend`, `api.tcpWorkerThreads`, `api.tcpAcceptQueueLimit`, `api.tcpListenBacklog`, `api.tcpReadTimeoutMs`, `api.tcpWriteTimeoutMs`, `api.tcpNoDelay`, `api.tcpKeepAlive` |
-| gRPC | `api.grpcPort`, `api.grpcWorkerThreads`, `api.grpcCompletionQueues`, `api.grpcMinPollers`, `api.grpcMaxPollers`, `api.grpcMaxConcurrentStreams`, `api.grpcResourceQuotaBytes` |
-| TLS | `api.transportMode`, `api.tls.certPath`, `api.tls.keyPath`, `api.tls.caPath`, `api.tls.psk`, `api.tls.pskIdentity`, `api.tls.verifyPeer` |
+| `api.backends` | Server backends to start: HTTP, TCP, gRPC, or a combination. |
+| `api.serverBackendPath` | Optional dynamic server-provider library path. |
+| `api.transportBackendPath` | Optional dynamic transport-provider library path. |
+| `api.httpBackendPath` | Optional HTTP backend implementation path. |
+| `api.tcpBackendPath` | Optional TCP backend implementation path. |
+| `api.grpcBackendPath` | Optional gRPC backend implementation path. |
+
+HTTP settings:
+
+| Field | Meaning |
+|---|---|
+| `api.bindHost` | Host address used by API listeners. |
+| `api.httpPort` | HTTP listener port. |
+| `api.httpMaxBatchItems` | Maximum items accepted in one HTTP batch. |
+| `api.httpMaxScanItems` | Maximum scan rows returned per HTTP request. |
+| `api.httpMaxHistoryEntries` | Maximum history entries returned per HTTP request. |
+| `api.httpMaxContentLength` | Maximum HTTP request body size. |
+
+TCP settings:
+
+| Field | Meaning |
+|---|---|
+| `api.tcpPort` | TCP listener port. |
+| `api.tcpIoBackend` | TCP I/O backend selection. |
+| `api.tcpWorkerThreads` | TCP worker thread count; `0` means automatic behavior. |
+| `api.tcpAcceptQueueLimit` | Maximum accepted sockets waiting for workers. |
+| `api.tcpListenBacklog` | OS listen backlog. |
+| `api.tcpReadTimeoutMs` | Read timeout in milliseconds. |
+| `api.tcpWriteTimeoutMs` | Write timeout in milliseconds. |
+| `api.tcpNoDelay` | Enables or disables Nagle avoidance. |
+| `api.tcpKeepAlive` | Enables or disables TCP keepalive. |
+
+gRPC settings:
+
+| Field | Meaning |
+|---|---|
+| `api.grpcPort` | gRPC listener port. |
+| `api.grpcWorkerThreads` | gRPC worker thread count. |
+| `api.grpcCompletionQueues` | Completion queue count. |
+| `api.grpcMinPollers` | Minimum poller count. |
+| `api.grpcMaxPollers` | Maximum poller count. |
+| `api.grpcMaxConcurrentStreams` | HTTP/2 stream concurrency limit. |
+| `api.grpcResourceQuotaBytes` | gRPC resource quota in bytes. |
+
+TLS settings:
+
+| Field | Meaning |
+|---|---|
+| `api.transportMode` | `TLS` or `PLAIN`. |
+| `api.tls.certPath` | Server certificate path. |
+| `api.tls.keyPath` | Server private key path. |
+| `api.tls.caPath` | CA bundle path for peer verification. |
+| `api.tls.psk` | Pre-shared key bytes. |
+| `api.tls.pskIdentity` | Pre-shared key identity. |
+| `api.tls.verifyPeer` | Whether peer verification is required. |
 
 The API server is useful when `AkkEngine` is acting as a local process boundary or embedded service. Library users that call `AkkEngine` directly can leave it disabled.
+
+For startup examples, HTTP endpoints, and TCP framing, see [Low-Level API Server](/akkaradb-native/api/low-level/api-server/).
 
 ## Suggested Presets
 

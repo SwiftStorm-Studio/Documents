@@ -103,6 +103,8 @@ The default WAL mode is `SYNC`. `ASYNC` improves write throughput by flushing in
 
 For the complete option map, including MemTable, SST, Blob, VersionLog, API server, and cluster-related fields, see [Low-Level API Options](/akkaradb-native/api/low-level/options/).
 
+If you want to expose the same engine instance over HTTP, TCP, or gRPC, see [Low-Level API Server](/akkaradb-native/api/low-level/api-server/).
+
 ## Basic Read And Write
 
 `put()` writes or replaces a value. `remove()` writes a tombstone. Reads use `std::optional<std::vector<uint8_t>>` by default.

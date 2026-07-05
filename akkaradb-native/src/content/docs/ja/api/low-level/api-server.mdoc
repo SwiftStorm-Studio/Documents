@@ -1,0 +1,180 @@
+---
+title: API サーバー
+description: 組み込みの HTTP、TCP、gRPC API サーバーから AkkEngine を公開する方法。
+---
+
+API サーバー層を有効にすると、`AkkEngine` の操作を別プロセスやネットワーク越しに受け付けられます。これは高レベル API ではなく、低レベル API の公開境界です。呼び出し側はバイト列のキーとバイト列の値を送り、サーバーはそれを同じ `AkkEngine` の操作へ渡します。
+
+別プロセス、別言語ランタイム、テストツール、またはサービス境界からエンジンへアクセスしたい場合に使います。同じ C++ プロセス内で完結するアプリケーションなら、`AkkEngine` を直接呼ぶほうが単純で、通信フレーミングのオーバーヘッドも避けられます。
+
+## サーバーを有効にする
+
+エンジンを開く前にコンポーネントを有効化します。`components.apiEnabled` を `true` にする場合、`api.bindHost` は必須です。
+
+```cpp
+#include "akk/engine/AkkEngine.hpp"
+
+#include <utility>
+
+namespace engine = akkaradb::engine;
+
+int main() {
+    engine::AkkEngineOptions opts;
+    opts.paths.dataDir = "data/api";
+
+    opts.components.apiEnabled = true;
+    opts.api.bindHost = "127.0.0.1";
+    opts.api.backends = {
+        engine::AkkEngineOptions::ApiBackend::HTTP,
+    };
+    opts.api.httpPort = 7070;
+    opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::PLAIN;
+
+    auto db = engine::AkkEngine::open(std::move(opts));
+
+    // エンジンが開いている間、HTTP リスナーも起動しています。
+    db->close();
+}
+```
+
+`api.backends` が空の場合、現在のビルドに含まれている通信方式がまとめて起動されます。多くのローカルビルドでは HTTP と TCP が対象です。gRPC は、本物の Protobuf/gRPC バックエンドが有効なビルドでだけ含まれます。
+
+公開環境や共有環境では、通信方式を明示し、TLS を使う構成を推奨します。`PLAIN` はローカル開発では便利ですが、安全なデプロイの既定値として扱うべきではありません。
+
+## 通信方式の選び方
+
+| 通信方式 | 向いている用途 |
+|---|---|
+| HTTP | 手元での確認、簡単なローカルツール、スクリプト、粗いサービス連携。 |
+| TCP | AK5 バイナリフレームを直接実装できる、高スループット向けクライアント。 |
+| gRPC | gRPC バックエンドを含むビルドで、生成クライアントやサービス定義を使いたい場合。 |
+
+どの通信方式でも、基本はバイト列指向のキー/値操作です。HTTP API も一般的な JSON REST API ではありません。読み取りは生のバイト列を返し、多くの更新系エンドポイントは `204 No Content` を返します。
+
+## HTTP の簡単な確認
+
+サーバーが `127.0.0.1:7070` で起動していれば、基本操作は `curl` で確認できます。
+
+```powershell
+curl -s -X POST "http://127.0.0.1:7070/v1/put?key=user:1" --data "Alice"
+curl -s "http://127.0.0.1:7070/v1/get?key=user:1"
+curl -s "http://127.0.0.1:7070/v1/ping"
+curl -s -X DELETE "http://127.0.0.1:7070/v1/remove?key=user:1"
+```
+
+キーはクエリ文字列で渡され、サーバー側でパーセントデコードされます。`/v1/put` のリクエストボディは、そのまま生の値として保存されます。`/v1/get` は値のバイト列を返し、キーが存在しない場合は `404` を返します。
+
+## HTTP エンドポイント
+
+| メソッド | パス | パラメータ | 結果 |
+|---|---|---|---|
+| `GET` | `/v1/ping` | なし | テキスト `pong`。 |
+| `POST` | `/v1/put` | `key` | リクエストボディを値として保存します。 |
+| `POST` | `/v1/putHinted` | `key`, `fp64`, `miniKey` | 呼び出し側が計算したキーフィンガープリント付きで保存します。 |
+| `GET` | `/v1/get` | `key` | 生の値バイト列、または `404`。 |
+| `DELETE` | `/v1/remove` | `key` | 対象キーへ削除マーカーを書き込みます。 |
+| `DELETE` | `/v1/removeHinted` | `key`, `fp64`, `miniKey` | キーフィンガープリント付きで削除します。 |
+| `GET` | `/v1/exists` | `key` | 1 バイトの `0` または `1` を返します。 |
+| `GET` | `/v1/count` | `start`, `end` | `[start, end)` の件数をリトルエンディアン `u64` で返します。 |
+| `GET` | `/v1/scan` | `start`, `end`, 任意の `limit`, 任意の `stream` | スキャン結果をバイナリ、またはチャンク転送で返します。 |
+| `GET` | `/v1/getAt` | `key`, `seq` | 過去時点の値バイト列、または `404`。 |
+| `GET` | `/v1/history` | `key`, 任意の `stream` | バージョン履歴をバイナリ、またはチャンク転送で返します。 |
+| `POST` | `/v1/rollbackTo` | `seq` | エンジン全体を指定シーケンスへ戻します。 |
+| `POST` | `/v1/rollbackKey` | `key`, `seq` | 1 つのキーを指定シーケンスへ戻します。 |
+| `POST` | `/v1/batchPut` | バイナリボディ | 複数のキー/値をまとめて保存します。 |
+| `POST` | `/v1/batchGet` | バイナリボディ | 複数キーの結果をまとめて返します。 |
+| `POST` | `/v1/forceSync` | なし | 永続化状態を強制同期します。 |
+| `POST` | `/v1/forceFlush` | なし | MemTable の内容を SST 側へフラッシュします。 |
+| `POST` | `/v1/runBlobGc` | なし | Blob の領域回収を実行します。 |
+| `GET` | `/v1/stats` | なし | 圧縮されたバイナリ統計スナップショットを返します。 |
+
+`/v1/scan` と `/v1/history` は、`stream=1` や `stream=true` のように `stream` が真として解釈される場合、チャンク転送へ切り替わります。
+
+## バイナリペイロード
+
+HTTP の一括処理やスキャン系エンドポイントは、リトルエンディアンのバイナリ形式を使います。
+
+| ペイロード | 形式 |
+|---|---|
+| `batchPut` リクエスト | `[count:u32le]` の後に、`[key_len:u32le][value_len:u32le][key bytes][value bytes]` を `count` 件。 |
+| `batchGet` リクエスト | `[count:u32le]` の後に、`[key_len:u32le][key bytes]` を `count` 件。 |
+| `batchGet` レスポンス | `[count:u32le]` の後に、`[status:u8][value_len:u32le][value bytes]` を `count` 件。 |
+| `scan` レスポンス | `[count:u32le][truncated:u8]` の後に、`[key_len:u16le][value_len:u32le][key bytes][value bytes]` の行を続けます。 |
+| `history` レスポンス | `[count:u32le][truncated:u8]` の後に、`[seq:u64le][source_node_id:u64le][timestamp_ns:u64le][flags:u32le][value_len:u32le][value bytes]` の履歴を続けます。 |
+
+安定したクライアントライブラリが必要な場合は、アプリケーション内のあちこちでバイナリ解析を書くより、小さな言語別クライアントで包むほうが扱いやすくなります。
+
+## TCP プロトコル
+
+TCP 通信方式は AK5 バイナリフレームを使います。リクエストフレームは 16 バイトのヘッダーから始まります。
+
+```text
+char[4] magic = "AK5Q"
+u8      version = 2
+u8      opcode
+u32     request_id
+u16     key_len
+u32     val_len
+```
+
+レスポンスフレームは 13 バイトのヘッダーから始まります。
+
+```text
+char[4] magic = "AK5S"
+u8      status
+u32     request_id
+u32     val_len
+```
+
+TCP リクエストは `[request header][key bytes][value bytes][crc32c:u32le]` です。CRC は `key bytes + value bytes` を対象にします。TCP レスポンスは `[response header][value bytes][crc32c:u32le]` で、CRC は値バイト列を対象にします。
+
+| オペコード | 操作 |
+|---:|---|
+| `0x01` | `GET` |
+| `0x02` | `PUT` |
+| `0x03` | `REMOVE` |
+| `0x04` | `GET_AT` |
+| `0x05` | `BATCH_PUT` |
+| `0x06` | `BATCH_GET` |
+| `0x07` | `PING` |
+| `0x08` | `EXISTS` |
+| `0x09` | `COUNT` |
+| `0x0A` | `SCAN` |
+| `0x0B` | `HISTORY` |
+| `0x0C` | `ROLLBACK_TO` |
+| `0x0D` | `ROLLBACK_KEY` |
+| `0x0E` | `FORCE_SYNC` |
+| `0x0F` | `FORCE_FLUSH` |
+| `0x10` | `STATS` |
+| `0x11` | `SCAN_STREAM` |
+| `0x12` | `HISTORY_STREAM` |
+
+TCP は、通信のオーバーヘッドを抑えたい場合や、クライアント実装の両側を自分で管理できる場合に向いています。
+
+## gRPC
+
+gRPC 通信方式は、同じエンジン操作に対応する単発 RPC と、スキャンおよび履歴向けのサーバーストリーミング RPC を提供します。これはビルド依存です。Protobuf/gRPC サポートがない場合、gRPC バックエンドは実際のサーバー通信方式として利用できません。
+
+最低限のフレーミングオーバーヘッドよりも、生成クライアントやサービス定義を優先したい場合に gRPC が向いています。
+
+## TLS と公開範囲
+
+API サーバーの TLS は `api.transportMode` と `api.tls` で制御します。同じ通信モードが、有効化された API 通信方式へ適用されます。
+
+```cpp
+opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::TLS;
+opts.api.tls.certPath = "certs/server.crt";
+opts.api.tls.keyPath = "certs/server.key";
+opts.api.tls.caPath = "certs/ca.crt";
+opts.api.tls.verifyPeer = true;
+```
+
+ローカル開発では `127.0.0.1` にバインドするのが扱いやすいです。外部インターフェイスへバインドする場合は、TLS、リクエスト制限、運用上のアクセス制御を先に決めてから公開してください。
+
+## 終了処理とエラー
+
+サーバーの寿命はエンジンの寿命に従います。`AkkEngine::open()` の途中で起動し、`close()` またはエンジン破棄時に停止します。
+
+HTTP では、不正なリクエストは `400`、キー未存在や未知のパスは `404`、内部のエンジン操作が例外を投げた場合は `500` になります。TCP と gRPC でも、同じ区別をそれぞれのステータス表現で返します。
+
+API サーバーのコードは `akkara/akkserver/` にあり、AGPLv3 で別ライセンスになっています。サーバー有効ビルドをどのように配布するかを決めるときは、この境界も確認してください。

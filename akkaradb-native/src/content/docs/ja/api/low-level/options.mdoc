@@ -149,17 +149,69 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 
 ## API サーバーオプション
 
-`components.apiEnabled` を有効にすると、`api.backends` で指定した通信層が起動します。
+`components.apiEnabled` を有効にすると、`api.backends` で指定した通信層が起動します。プロセス内から直接 `AkkEngine` を呼ぶだけなら、無効のままで問題ありません。
 
-| グループ | 主なフィールド |
+| フィールド | 意味 |
 |---|---|
-| バックエンド選択 | `api.backends`, `api.serverBackendPath`, `api.httpBackendPath`, `api.tcpBackendPath`, `api.grpcBackendPath`, `api.transportBackendPath` |
-| HTTP | `api.bindHost`, `api.httpPort`, `api.httpMaxBatchItems`, `api.httpMaxScanItems`, `api.httpMaxHistoryEntries`, `api.httpMaxContentLength` |
-| TCP | `api.tcpPort`, `api.tcpIoBackend`, `api.tcpWorkerThreads`, `api.tcpAcceptQueueLimit`, `api.tcpListenBacklog`, `api.tcpReadTimeoutMs`, `api.tcpWriteTimeoutMs`, `api.tcpNoDelay`, `api.tcpKeepAlive` |
-| gRPC | `api.grpcPort`, `api.grpcWorkerThreads`, `api.grpcCompletionQueues`, `api.grpcMinPollers`, `api.grpcMaxPollers`, `api.grpcMaxConcurrentStreams`, `api.grpcResourceQuotaBytes` |
-| TLS | `api.transportMode`, `api.tls.certPath`, `api.tls.keyPath`, `api.tls.caPath`, `api.tls.psk`, `api.tls.pskIdentity`, `api.tls.verifyPeer` |
+| `api.backends` | 起動するサーバーバックエンドです。HTTP、TCP、gRPC、または複数指定です。 |
+| `api.serverBackendPath` | 動的なサーバープロバイダのパスです。 |
+| `api.transportBackendPath` | 動的な通信プロバイダのパスです。 |
+| `api.httpBackendPath` | HTTP バックエンド実装のパスです。 |
+| `api.tcpBackendPath` | TCP バックエンド実装のパスです。 |
+| `api.grpcBackendPath` | gRPC バックエンド実装のパスです。 |
+
+HTTP 設定:
+
+| フィールド | 意味 |
+|---|---|
+| `api.bindHost` | API リスナーが bind するホストアドレスです。 |
+| `api.httpPort` | HTTP リスナーのポートです。 |
+| `api.httpMaxBatchItems` | 1 回の HTTP バッチで受け付ける最大項目数です。 |
+| `api.httpMaxScanItems` | 1 回の HTTP リクエストで返す最大スキャン行数です。 |
+| `api.httpMaxHistoryEntries` | 1 回の HTTP リクエストで返す最大履歴件数です。 |
+| `api.httpMaxContentLength` | HTTP リクエストボディの最大サイズです。 |
+
+TCP 設定:
+
+| フィールド | 意味 |
+|---|---|
+| `api.tcpPort` | TCP リスナーのポートです。 |
+| `api.tcpIoBackend` | TCP I/O バックエンドの選択です。 |
+| `api.tcpWorkerThreads` | TCP ワーカースレッド数です。`0` は自動挙動です。 |
+| `api.tcpAcceptQueueLimit` | ワーカー待ちの accepted socket 上限です。 |
+| `api.tcpListenBacklog` | OS の listen backlog です。 |
+| `api.tcpReadTimeoutMs` | 読み取りタイムアウトです。 |
+| `api.tcpWriteTimeoutMs` | 書き込みタイムアウトです。 |
+| `api.tcpNoDelay` | Nagle 回避を有効化するかどうかです。 |
+| `api.tcpKeepAlive` | TCP keepalive を有効化するかどうかです。 |
+
+gRPC 設定:
+
+| フィールド | 意味 |
+|---|---|
+| `api.grpcPort` | gRPC リスナーのポートです。 |
+| `api.grpcWorkerThreads` | gRPC ワーカースレッド数です。 |
+| `api.grpcCompletionQueues` | Completion queue の数です。 |
+| `api.grpcMinPollers` | 最小 poller 数です。 |
+| `api.grpcMaxPollers` | 最大 poller 数です。 |
+| `api.grpcMaxConcurrentStreams` | HTTP/2 stream の同時実行上限です。 |
+| `api.grpcResourceQuotaBytes` | gRPC resource quota のバイト数です。 |
+
+TLS 設定:
+
+| フィールド | 意味 |
+|---|---|
+| `api.transportMode` | `TLS` または `PLAIN` です。 |
+| `api.tls.certPath` | サーバー証明書のパスです。 |
+| `api.tls.keyPath` | サーバー秘密鍵のパスです。 |
+| `api.tls.caPath` | peer 検証に使う CA bundle のパスです。 |
+| `api.tls.psk` | 事前共有鍵のバイト列です。 |
+| `api.tls.pskIdentity` | 事前共有鍵の identity です。 |
+| `api.tls.verifyPeer` | peer 検証を必須にするかどうかです。 |
 
 API サーバーは、`AkkEngine` をプロセス境界や組み込みサービスとして公開したい場合に使います。ライブラリとして直接 `AkkEngine` を呼ぶだけなら無効のままで問題ありません。
+
+起動例、HTTP エンドポイント、TCP フレーミングは、[低レベル API の API サーバー](/akkaradb-native/ja/api/low-level/api-server/) に分けています。
 
 ## 推奨プリセット
 
