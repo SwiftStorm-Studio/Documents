@@ -1,0 +1,152 @@
+---
+title: 低レベル API の統計情報
+description: akkaradb::engine::EngineStats のメトリクスリファレンスです。
+---
+
+`AkkEngine::stats()` は `akkaradb::engine::EngineStats` のスナップショットを返します。値はカウンタとサブシステムの瞬間状態で、デバッグ、運用ダッシュボード、ベンチマーク、統合テストの確認に使います。
+
+```cpp
+const auto stats = db->stats();
+
+const double readHitRate =
+    stats.getsTotal == 0
+        ? 0.0
+        : double(stats.getsMemtableHit + stats.getsSstHit) / double(stats.getsTotal);
+```
+
+## 最上位フィールド
+
+| フィールド | 意味 |
+|---|---|
+| `currentSeq` | 書き込みに割り当てられた最新のシーケンス番号です。 |
+| `nodeId` | ローカルまたはクラスタ動作で使われる安定したノード ID です。 |
+| `putsTotal` | 最上位の put 呼び出し総数です。 |
+| `removesTotal` | 最上位の remove 呼び出し総数です。 |
+| `getsTotal` | 最上位の get 呼び出し総数です。 |
+| `getsMemtableHit` | MemTable から返せた読み取り数です。 |
+| `getsSstHit` | SST から返せた読み取り数です。 |
+| `getsMiss` | 有効な値が見つからなかった読み取り数です。 |
+| `existsTotal` | 存在確認の呼び出し総数です。 |
+| `scansTotal` | 範囲スキャンの呼び出し総数です。 |
+| `blobPutsTotal` | Blob ストレージへ回された書き込み数です。 |
+
+`getsMemtableHit`、`getsSstHit`、`getsMiss` を `getsTotal` と比較すると、読み取り対象がメモリ上に多いのか、SST に落ちているのか、そもそも存在しないキーが多いのかを判断できます。
+
+## MemTable 統計
+
+| フィールド | 意味 |
+|---|---|
+| `memtable.shardCount` | 現在の MemTable シャード数です。 |
+| `memtable.thresholdBytesPerShard` | シャードごとのフラッシュ閾値です。 |
+| `memtable.approxBytes` | MemTable が保持している概算バイト数です。 |
+| `memtable.putsApplied` | MemTable 内部へ適用された put 数です。 |
+| `memtable.removesApplied` | MemTable 内部へ適用された削除マーカー数です。 |
+| `memtable.flushesCompleted` | 完了した MemTable フラッシュ数です。 |
+| `memtable.bytesFlushed` | フラッシュで出力されたバイト数です。 |
+
+`approxBytes` が `thresholdBytesPerShard * shardCount` に近づくほど、フラッシュ圧力が高い状態です。フラッシュ回数が多いのに 1 回あたりのバイト数が小さい場合は、閾値が小さすぎる可能性があります。
+
+## WAL 統計
+
+| フィールド | 意味 |
+|---|---|
+| `wal.enabled` | WAL が有効かどうかです。 |
+| `wal.shardCount` | 現在の WAL シャード数です。 |
+| `wal.entriesWritten` | WAL に書かれたエントリ数です。 |
+| `wal.bytesWritten` | WAL に書かれた総バイト数です。 |
+| `wal.batchesFlushed` | グループ化されてフラッシュされたバッチ数です。 |
+| `wal.syncsExecuted` | 物理同期の実行回数です。 |
+| `wal.segmentRotations` | WAL セグメントのローテーション回数です。 |
+
+`SYNC` では `syncsExecuted` が書き込み数に近づきやすくなります。`ASYNC` では、複数書き込みがまとめられるため、`entriesWritten` に対して `batchesFlushed` や `syncsExecuted` が少なくなるのが自然です。
+
+## SST 統計
+
+| フィールド | 意味 |
+|---|---|
+| `sst.enabled` | SST ストレージが有効かどうかです。 |
+| `sst.levels` | レベルごとのファイル数、バイト数、予算です。 |
+| `sst.fileCount` | SST ファイルの総数です。 |
+| `sst.bytes` | SST の総バイト数です。 |
+| `sst.l0FileCount` | Level 0 のファイル数です。 |
+| `sst.compactionPending` | 圧縮処理待ちがあるかどうかです。 |
+| `sst.compactionsCompleted` | 完了した圧縮処理数です。 |
+| `sst.filesCompacted` | 圧縮処理で消費されたファイル数です。 |
+| `sst.bytesCompactedIn` | 圧縮処理で読み込まれたバイト数です。 |
+| `sst.bytesCompactedOut` | 圧縮処理で書き出されたバイト数です。 |
+| `sst.l0Stalls` | L0 関連の停止イベント数です。 |
+
+`l0FileCount`、`compactionPending`、`l0Stalls` はまとめて見ます。継続的な書き込み中にこれらが上がり続ける場合、フラッシュ生成に対して圧縮処理が追いついていない可能性があります。
+
+`sst.levels` の各要素は以下の形です。
+
+| フィールド | 意味 |
+|---|---|
+| `level` | LSM のレベル番号です。 |
+| `fileCount` | そのレベルのファイル数です。 |
+| `bytes` | そのレベルの保存バイト数です。 |
+| `budgetBytes` | そのレベルの目標サイズ予算です。 |
+
+## Blob 統計
+
+| フィールド | 意味 |
+|---|---|
+| `blob.enabled` | Blob ストレージが有効かどうかです。 |
+| `blob.thresholdBytes` | Blob 化される値サイズの閾値です。 |
+| `blob.blobsWritten` | 書き込まれた Blob 数です。 |
+| `blob.bytesUncompressed` | 圧縮前のペイロード総バイト数です。 |
+| `blob.bytesOnDisk` | ディスク上の Blob バイト数です。 |
+| `blob.blobsDeleted` | 削除された Blob 数です。 |
+| `blob.gcCycles` | Blob GC の実行回数です。 |
+
+圧縮を有効にしている場合は `bytesUncompressed` と `bytesOnDisk` を比較します。`gcCycles` が増えているのに `blobsDeleted` が増えない場合、GC は走っているものの回収対象が少ない状態です。
+
+## バージョン履歴統計
+
+| フィールド | 意味 |
+|---|---|
+| `vlog.enabled` | バージョン履歴が有効かどうかです。 |
+| `vlog.syncMode` | バージョン履歴ログの同期モードの数値表現です。 |
+| `vlog.groupN` | エントリ数によるグループ化閾値です。 |
+| `vlog.groupMicros` | 時間によるグループ化閾値です。 |
+| `vlog.groupBytes` | バイト数によるグループ化閾値です。 |
+| `vlog.asyncMaxPendingBytes` | 非同期書き込みの未処理バイト上限です。 |
+| `vlog.indexedKeys` | 履歴がインデックスされたキー数です。 |
+| `vlog.indexedEntries` | 履歴エントリの総数です。 |
+| `vlog.rollbackEntries` | ロールバック操作で生成されたエントリ数です。 |
+| `vlog.pendingWrites` | まだフラッシュされていない履歴書き込み数です。 |
+| `vlog.pendingBytes` | まだフラッシュされていない履歴ログのバイト数です。 |
+| `vlog.durableBytes` | 永続化済みの履歴ログバイト数です。 |
+| `vlog.flushThreadRunning` | 非同期フラッシュスレッドが動作中かどうかです。 |
+
+`pendingBytes` と `asyncMaxPendingBytes` はバックプレッシャーの兆候を見るために使います。`rollbackEntries` はロールバック API を使った場合だけ増えるのが自然です。
+
+## API 統計
+
+`stats.api` は API サーバーコンポーネントを有効化した場合に意味を持ちます。
+
+| グループ | フィールド |
+|---|---|
+| HTTP 状態 | `httpEnabled`, `httpTlsEnabled`, `httpPort`, `httpMaxBatchItems`, `httpMaxScanItems`, `httpMaxHistoryEntries`, `httpMaxContentLength` |
+| HTTP 通信量 | `httpConnectionsAcceptedTotal`, `httpConnectionsClosedTotal`, `httpConnectionsActive`, `httpRequestsTotal`, `httpResponsesTotal`, `httpBytesReceivedTotal`, `httpBytesSentTotal` |
+| HTTP エラー | `httpProtocolErrorsTotal`, `httpErrorsTotal` |
+| HTTP バッチ | `httpBatchPutItemsTotal`, `httpBatchGetItemsTotal` |
+| TCP 状態 | `tcpEnabled`, `tcpTlsEnabled`, `tcpIoBackend`, `tcpWorkerThreads`, `tcpAcceptQueueLimit`, `tcpListenBacklog`, `tcpReadTimeoutMs`, `tcpWriteTimeoutMs` |
+| TCP 通信量 | `tcpConnectionsAcceptedTotal`, `tcpConnectionsClosedTotal`, `tcpConnectionsActive`, `tcpRequestsTotal`, `tcpResponsesTotal`, `tcpBytesReceivedTotal`, `tcpBytesSentTotal` |
+| TCP キュー・バックプレッシャー | `tcpAcceptQueueDepth`, `tcpAcceptQueuePeakDepth`, `tcpAcceptQueueRejectedTotal`, `tcpAcceptQueueExpiredTotal`, `tcpBackpressureFlushesTotal`, `tcpBackpressureDisconnectsTotal` |
+| TCP エラー・バッチ | `tcpProtocolErrorsTotal`, `tcpCrcErrorsTotal`, `tcpPipelineBatchesTotal`, `tcpBatchPutItemsTotal`, `tcpBatchGetItemsTotal` |
+| gRPC 状態 | `grpcEnabled`, `grpcTlsEnabled`, `grpcPort`, `grpcWorkerThreads`, `grpcCompletionQueues`, `grpcMinPollers`, `grpcMaxPollers`, `grpcMaxConcurrentStreams`, `grpcResourceQuotaBytes` |
+| gRPC 通信量 | `grpcRequestsTotal`, `grpcResponsesTotal`, `grpcActiveRequests`, `grpcErrorsTotal`, `grpcBatchPutItemsTotal`, `grpcBatchGetItemsTotal` |
+
+API 統計は、通信境界を含むテストやサービス運用で役立ちます。`api.enabled` が false の組み込み用途では無視して構いません。
+
+## 実用的な確認ポイント
+
+| 見たいこと | 見るフィールド |
+|---|---|
+| 読取経路の状態 | `getsMemtableHit + getsSstHit` が `getsTotal` の大半を説明できるか。 |
+| フラッシュ圧力 | `memtable.approxBytes` が閾値に近く、フラッシュが頻発していないか。 |
+| 圧縮処理の遅れ | `sst.l0FileCount`, `sst.compactionPending`, `sst.l0Stalls` が増え続けていないか。 |
+| WAL のグループ化 | 非同期モードで `batchesFlushed` が `entriesWritten` より十分少ないか。 |
+| Blob の膨張 | `blob.bytesOnDisk` が実データ量より過剰に増えていないか。 |
+| 履歴ログの滞留 | `vlog.pendingBytes` が `vlog.asyncMaxPendingBytes` に近づいていないか。 |

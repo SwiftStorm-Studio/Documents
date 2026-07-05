@@ -105,6 +105,8 @@ auto db = engine::AkkEngine::open(std::move(opts));
 
 WAL のデフォルト同期モードは `SYNC`（強固な永続化）です。`ASYNC` を指定すると、バックグラウンドでのフラッシュ処理により書き込みスループットを最大化できます。`OFF` は WAL 自体を出力しないため、一時データのキャッシュ用途や、厳密に制御されたベンチマーク測定環境以外での使用は避けてください。
 
+MemTable、SST、Blob、バージョン履歴、API サーバー、クラスタ関連を含む設定項目の全体像は、[低レベル API の設定オプション](/akkaradb-native/ja/api/low-level/options/) に分けています。
+
 ## 基本的な CRUD 操作
 
 `put()` は指定したキーで値を書き込み、すでに同一キーが存在する場合は上書きします。`remove()` は対象キーに削除マーカー（Tombstone）を書き込みます。最も標準的な読み取り API である `get()` の戻り値は `std::optional<std::vector<uint8_t>>` です。
@@ -383,6 +385,8 @@ if (stats.sst.enabled) {
 | `sst.fileCount`, `sst.levels` | 永続化された SST ファイルの総数および LSM-Tree の現在の階層の深さ |
 | `blob.bytesOnDisk`, `blob.gcCycles` | ディスク上の総 Blob 容量および Blob GC の実行サイクル回数 |
 | `vlog.indexedEntries`, `vlog.rollbackEntries` | バージョン履歴にインデックスされたエントリ数およびロールバック実行数 |
+
+全フィールドの一覧と読み取り方は、[低レベル API の統計情報](/akkaradb-native/ja/api/low-level/stats/) に分けています。
 
 ## 操作 API リファレンス
 

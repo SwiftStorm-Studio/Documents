@@ -1,0 +1,173 @@
+---
+title: 低レベル API の設定オプション
+description: akkaradb::engine::AkkEngineOptions の設定リファレンスです。
+---
+
+`akkaradb::engine::AkkEngineOptions` は、`AkkEngine::open()` の前にエンジン構成を決めるための設定構造体です。エンジンを開いた後は、多くの構成要素を実行中に切り替える前提ではありません。
+
+通常の組み込み用途では、まず `paths.dataDir` と永続化方針だけ決めれば十分です。それ以外の項目は、ストレージ調整、API サーバー、クラスタ実行時設定、ベンチマーク分離のために使います。
+
+## 最小構成
+
+```cpp
+akkaradb::engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/akkaradb";
+opts.wal.syncMode = akkaradb::engine::wal::WalSyncMode::ASYNC;
+opts.runtime.sstPromoteReads = true;
+
+auto db = akkaradb::engine::AkkEngine::open(std::move(opts));
+```
+
+`paths.dataDir` を設定すると、空のままの各パスはそこから自動的に導出されます。
+
+| フィールド | 導出される値 |
+|---|---|
+| `paths.walDir` | `<dataDir>/wal` |
+| `paths.blobDir` | `<dataDir>/blobs` |
+| `paths.sstDir` | `<dataDir>/sstable` |
+| `paths.manifestPath` | `<dataDir>/manifest.akmf` |
+| `paths.versionLogPath` | `<dataDir>/history.akvlog` |
+| `paths.clusterConfigPath` | `<dataDir>/cluster.akcc` |
+| `paths.nodeIdPath` | `<dataDir>/node.id` |
+
+## 構成要素の有効化
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `components.walEnabled` | `true` | 復旧と永続化のための先行書き込みログを有効化します。 |
+| `components.blobEnabled` | `true` | 大きな値を Blob ストレージへ逃がせるようにします。 |
+| `components.manifestEnabled` | `true` | SST のライフサイクルとチェックポイントを記録します。 |
+| `components.sstEnabled` | `true` | 永続化されたソート済みテーブルを有効化します。 |
+| `components.versionLogEnabled` | `false` | 履歴、過去時点読取、ロールバックを有効化します。 |
+| `components.clusterEnabled` | `false` | クラスタルーティングとレプリケーション実行時処理を有効化します。 |
+| `components.apiEnabled` | `false` | 設定済みの API 通信層を起動します。 |
+
+メモリ上だけの軽いテストでは、WAL、Blob、Manifest、SST を無効化できます。実データを扱う組み込み用途では、明確な理由がない限りデフォルトを維持してください。
+
+```cpp
+akkaradb::engine::AkkEngineOptions opts;
+opts.components.walEnabled = false;
+opts.components.blobEnabled = false;
+opts.components.manifestEnabled = false;
+opts.components.sstEnabled = false;
+```
+
+## 実行時オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `runtime.writerThreads` | `0` | 書き込み並列度用の予約項目です。`0` はエンジン側の既定挙動です。 |
+| `runtime.recoverWal` | `true` | 起動時に WAL を再生します。 |
+| `runtime.recoverSst` | `true` | 起動時に SST メタデータとファイルを復旧します。 |
+| `runtime.pruneWalOnFlush` | `true` | フラッシュ済みチェックポイント以前の WAL を削除対象にします。 |
+| `runtime.forceFlushOnClose` | `true` | `close()` 時に未フラッシュの MemTable をフラッシュします。 |
+| `runtime.forceSyncOnClose` | `true` | `close()` 時に永続化対象を物理同期します。 |
+| `runtime.sstPromoteReads` | `false` | SST でヒットした値を MemTable 側へ昇格し、繰り返し読取を速くします。 |
+
+`sstPromoteReads` は読み取り中心の組み込み用途に向いています。ストレージエンジンの読取経路を厳密に検証したいテストでは、無効のままにすると挙動を追いやすくなります。
+
+## MemTable オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `memtable.shardCount` | `0` | 明示的なシャード数です。`0` ではエンジンが選択します。 |
+| `memtable.expectedConcurrentWriters` | `0` | 自動シャード数を決めるための並行書き込み数ヒントです。 |
+| `memtable.autoShardCountCap` | `128` | 自動シャード数の上限です。 |
+| `memtable.thresholdBytesPerShard` | `64 MiB` | シャードごとの概算フラッシュ閾値です。 |
+| `memtable.backendFactory` | `nullptr` | カスタム MemTable 実装を差し込むためのファクトリです。 |
+| `memtable.onFlush` | `nullptr` | 内部用のフラッシュコールバックです。通常の利用者は設定しません。 |
+
+書き込みが多い場合は `thresholdBytesPerShard` を上げるとフラッシュ頻度を下げられます。メモリ制約が強い場合は下げて、`stats.memtable.approxBytes` を監視します。
+
+## WAL オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `wal.walDir` | 自動導出 | WAL セグメントのディレクトリです。 |
+| `wal.syncMode` | `SYNC` | 永続化モードです。`SYNC`、`ASYNC`、`OFF` があります。 |
+| `wal.shardCount` | `0` | WAL シャード数です。`0` はハードウェアスレッド数ベースの自動選択です。 |
+| `wal.groupN` | `128` | 非同期フラッシュでまとめる最大エントリ数です。 |
+| `wal.groupMicros` | `100` | 非同期フラッシュで待つ最大時間です。 |
+| `wal.groupBytes` | `4 MiB` | 非同期フラッシュでまとめる最大バイト数です。 |
+| `wal.asyncMaxPendingBytes` | `64 MiB` | 非同期 WAL の未同期データ上限です。 |
+
+書き込みごとに fsync 境界を越えたい場合は `SYNC` を使います。短い耐久性ウィンドウを許容してスループットを上げたい場合は `ASYNC` を使います。`OFF` は一時データや制御されたベンチマークに限定してください。
+
+## SST オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `sst.sstDir` | 自動導出 | SST ファイルのディレクトリです。 |
+| `sst.maxLevels` | `7` | LSM の最大レベル数です。 |
+| `sst.maxL0Files` | `4` | L0 ファイル数の目安です。増えると圧縮処理の圧力が高まります。 |
+| `sst.l1MaxBytes` | `64 MiB` | Level 1 のサイズ予算です。 |
+| `sst.levelSizeMultiplier` | `10.0` | レベルごとのサイズ拡大倍率です。 |
+| `sst.targetFileSize` | エンジン既定値 | 生成される SST ファイルの目標サイズです。 |
+| `sst.blockSize` | エンジン既定値 | SST 内部のブロックサイズです。 |
+| `sst.bloomBitsPerKey` | エンジン既定値 | Bloom filter の密度です。 |
+| `sst.blockCacheBytes` | `64 MiB` | SST ブロックキャッシュの容量です。 |
+| `sst.compactThreads` | `2` | バックグラウンド圧縮スレッド数です。 |
+| `sst.codec` | `ZSTD` | SST の圧縮形式です。 |
+
+`stats.sst.l0Stalls` が増える場合は、圧縮処理が書き込みに追いついていない可能性があります。読取時のキャッシュ効率を上げたい場合は `blockCacheBytes` を見直します。
+
+## Blob オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `blob.blobDir` | 自動導出 | Blob ファイルのディレクトリです。 |
+| `blob.thresholdBytes` | エンジン既定値 | このサイズ以上の値を Blob として保存します。 |
+| `blob.codec` | `NONE` | Blob の圧縮形式です。 |
+| `blob.gcOnFlush` | `false` | フラッシュ時に Blob GC を走らせます。 |
+| `blob.gcOnClose` | `false` | クローズ時に Blob GC を走らせます。 |
+
+Blob は大きな値を MemTable や SST 本体から分離するための仕組みです。バージョン履歴と組み合わせる場合、古い履歴が Blob を参照していないことを確認するまで GC の扱いは慎重にしてください。
+
+## バージョン履歴オプション
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `vlog.logPath` | 自動導出 | バージョン履歴ログのパスです。 |
+| `vlog.syncMode` | `ASYNC` | 履歴ログの同期モードです。`SYNC`、`ASYNC`、`BATCHED_SYNC` があります。 |
+| `vlog.groupN` | `128` | まとめてフラッシュする最大エントリ数です。 |
+| `vlog.groupMicros` | `500` | まとめてフラッシュする最大待ち時間です。 |
+| `vlog.groupBytes` | `1 MiB` | まとめてフラッシュする最大バイト数です。 |
+| `vlog.asyncMaxPendingBytes` | `64 MiB` | 未同期の履歴ログデータ上限です。 |
+
+`history()`、`getAt()`、`rollbackKey()`、`rollbackTo()` を使う場合は、エンジンを開く前に `components.versionLogEnabled` を有効化します。
+
+## Manifest とクラスタ
+
+| フィールド | デフォルト | 意味 |
+|---|---:|---|
+| `manifest.fastMode` | `false` | Manifest の永続化処理をバックグラウンドでまとめます。 |
+| `cluster.config` | 空 | 永続化されたクラスタ構成です。 |
+| `cluster.runtimeBackendPath` | 空 | 動的なランタイムプロバイダのパスです。 |
+| `cluster.runtime` | 既定値 | レプリケーション通信の実行時設定です。 |
+
+クラスタ設定はローカル組み込み用途とは分けて考えます。ノード ID、メンバーシップ、通信方式、ACK ポリシーが明確になるまでは `components.clusterEnabled` は無効のままにしてください。
+
+## API サーバーオプション
+
+`components.apiEnabled` を有効にすると、`api.backends` で指定した通信層が起動します。
+
+| グループ | 主なフィールド |
+|---|---|
+| バックエンド選択 | `api.backends`, `api.serverBackendPath`, `api.httpBackendPath`, `api.tcpBackendPath`, `api.grpcBackendPath`, `api.transportBackendPath` |
+| HTTP | `api.bindHost`, `api.httpPort`, `api.httpMaxBatchItems`, `api.httpMaxScanItems`, `api.httpMaxHistoryEntries`, `api.httpMaxContentLength` |
+| TCP | `api.tcpPort`, `api.tcpIoBackend`, `api.tcpWorkerThreads`, `api.tcpAcceptQueueLimit`, `api.tcpListenBacklog`, `api.tcpReadTimeoutMs`, `api.tcpWriteTimeoutMs`, `api.tcpNoDelay`, `api.tcpKeepAlive` |
+| gRPC | `api.grpcPort`, `api.grpcWorkerThreads`, `api.grpcCompletionQueues`, `api.grpcMinPollers`, `api.grpcMaxPollers`, `api.grpcMaxConcurrentStreams`, `api.grpcResourceQuotaBytes` |
+| TLS | `api.transportMode`, `api.tls.certPath`, `api.tls.keyPath`, `api.tls.caPath`, `api.tls.psk`, `api.tls.pskIdentity`, `api.tls.verifyPeer` |
+
+API サーバーは、`AkkEngine` をプロセス境界や組み込みサービスとして公開したい場合に使います。ライブラリとして直接 `AkkEngine` を呼ぶだけなら無効のままで問題ありません。
+
+## 推奨プリセット
+
+| 用途 | 重要な設定 |
+|---|---|
+| 単体テスト | WAL、Blob、Manifest、SST を無効化します。 |
+| 永続化ありの組み込み DB | `paths.dataDir` を設定し、WAL、Manifest、SST を有効のままにします。 |
+| 書き込みスループット重視 | `wal.syncMode = ASYNC`、WAL グループ設定、未同期バイト数を調整します。 |
+| 読み取り中心 | `runtime.sstPromoteReads` を有効化し、SST ブロックキャッシュを調整します。 |
+| 履歴・過去時点読取 | `components.versionLogEnabled` を有効化し、`vlog.syncMode` を明示します。 |
+| 外部公開 | `components.apiEnabled` を有効化し、各通信層の上限値と TLS を設定します。 |

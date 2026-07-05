@@ -1,5 +1,5 @@
 // @ts-check
-import {defineConfig} from 'astro/config';
+import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import markdoc from '@astrojs/markdoc';
 
@@ -30,7 +30,15 @@ export default defineConfig({
 					translations: { ja: 'ガイド' },
 					items: [
 						{ label: 'Overview', translations: { ja: '概要' }, slug: '' },
-						{ label: 'Low-Level API', translations: { ja: '低レベル API' }, slug: 'api/low-level' },
+						{
+							label: 'Low-Level API',
+							translations: { ja: '低レベル API' },
+							items: [
+								{ label: 'Guide', translations: { ja: 'ガイド' }, slug: 'api/low-level' },
+								{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
+								{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
+							],
+						},
 					],
 				},
 			],

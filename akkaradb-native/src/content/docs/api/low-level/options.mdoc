@@ -1,0 +1,173 @@
+---
+title: Low-Level API Options
+description: Configuration reference for akkaradb::engine::AkkEngineOptions.
+---
+
+`akkaradb::engine::AkkEngineOptions` controls the low-level engine shape before `AkkEngine::open()` creates or recovers an instance. Treat it as an immutable startup contract: after the engine is open, most component choices are fixed for that process.
+
+The most common embedded setup only needs `paths.dataDir` and a few durability choices. The remaining fields are for storage tuning, protocol servers, cluster runtime wiring, or benchmark isolation.
+
+## Minimal Embedded Configuration
+
+```cpp
+akkaradb::engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/akkaradb";
+opts.wal.syncMode = akkaradb::engine::wal::WalSyncMode::ASYNC;
+opts.runtime.sstPromoteReads = true;
+
+auto db = akkaradb::engine::AkkEngine::open(std::move(opts));
+```
+
+When `paths.dataDir` is set, empty component paths are derived from it.
+
+| Field | Derived value |
+|---|---|
+| `paths.walDir` | `<dataDir>/wal` |
+| `paths.blobDir` | `<dataDir>/blobs` |
+| `paths.sstDir` | `<dataDir>/sstable` |
+| `paths.manifestPath` | `<dataDir>/manifest.akmf` |
+| `paths.versionLogPath` | `<dataDir>/history.akvlog` |
+| `paths.clusterConfigPath` | `<dataDir>/cluster.akcc` |
+| `paths.nodeIdPath` | `<dataDir>/node.id` |
+
+## Component Switches
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `components.walEnabled` | `true` | Enables write-ahead logging for recovery and durability. |
+| `components.blobEnabled` | `true` | Enables large-value offload through Blob storage. |
+| `components.manifestEnabled` | `true` | Tracks SST lifecycle and checkpoints. |
+| `components.sstEnabled` | `true` | Enables persistent sorted-string-table storage. |
+| `components.versionLogEnabled` | `false` | Enables history, point-in-time reads, and rollback. |
+| `components.clusterEnabled` | `false` | Enables cluster routing and replication runtime. |
+| `components.apiEnabled` | `false` | Starts configured API transports during engine startup. |
+
+For pure in-memory smoke tests, disable WAL, Blob, manifest, and SST. For real embedded storage, keep the defaults unless you are intentionally isolating a subsystem.
+
+```cpp
+akkaradb::engine::AkkEngineOptions opts;
+opts.components.walEnabled = false;
+opts.components.blobEnabled = false;
+opts.components.manifestEnabled = false;
+opts.components.sstEnabled = false;
+```
+
+## Runtime Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `runtime.writerThreads` | `0` | Reserved for writer parallelism; `0` means engine-selected behavior. |
+| `runtime.recoverWal` | `true` | Replays WAL files on startup. |
+| `runtime.recoverSst` | `true` | Recovers SST metadata and files on startup. |
+| `runtime.pruneWalOnFlush` | `true` | Removes WAL segments already covered by a durable flush checkpoint. |
+| `runtime.forceFlushOnClose` | `true` | Flushes pending MemTable data when `close()` runs. |
+| `runtime.forceSyncOnClose` | `true` | Forces durable state to disk when `close()` runs. |
+| `runtime.sstPromoteReads` | `false` | Promotes SST hits back into MemTable to speed repeated reads. |
+
+`sstPromoteReads` is useful for read-heavy embedded workloads. Leave it off when you want read paths to avoid mutating in-memory state, such as storage-engine tests.
+
+## MemTable Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `memtable.shardCount` | `0` | Explicit shard count. `0` lets the engine choose. |
+| `memtable.expectedConcurrentWriters` | `0` | Hint used for automatic shard sizing. |
+| `memtable.autoShardCountCap` | `128` | Upper bound for automatic shard count. |
+| `memtable.thresholdBytesPerShard` | `64 MiB` | Approximate per-shard flush threshold. |
+| `memtable.backendFactory` | `nullptr` | Optional custom MemTable implementation factory. |
+| `memtable.onFlush` | `nullptr` | Internal flush callback; applications normally leave this unset. |
+
+For write-heavy workloads, raise `thresholdBytesPerShard` to reduce flush frequency. For constrained memory environments, lower it and monitor `stats.memtable.approxBytes`.
+
+## WAL Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `wal.walDir` | derived | Directory for WAL segments. |
+| `wal.syncMode` | `SYNC` | Durability mode: `SYNC`, `ASYNC`, or `OFF`. |
+| `wal.shardCount` | `0` | WAL shard count; `0` means one per hardware thread, capped internally. |
+| `wal.groupN` | `128` | Max entries per grouped async flush. |
+| `wal.groupMicros` | `100` | Max async flush delay in microseconds. |
+| `wal.groupBytes` | `4 MiB` | Max bytes per grouped async flush. |
+| `wal.asyncMaxPendingBytes` | `64 MiB` | Backpressure limit for pending async WAL data. |
+
+Use `SYNC` when every write should cross an fsync boundary before returning. Use `ASYNC` for higher throughput when a small durability window is acceptable. Use `OFF` only for temporary data or controlled benchmarks.
+
+## SST Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `sst.sstDir` | derived | Directory for SST files. |
+| `sst.maxLevels` | `7` | Number of LSM levels. |
+| `sst.maxL0Files` | `4` | L0 file count before compaction pressure rises. |
+| `sst.l1MaxBytes` | `64 MiB` | Level 1 size budget. |
+| `sst.levelSizeMultiplier` | `10.0` | Size growth multiplier between levels. |
+| `sst.targetFileSize` | engine default | Target SST file size. |
+| `sst.blockSize` | engine default | Data block size inside SST files. |
+| `sst.bloomBitsPerKey` | engine default | Bloom filter density. |
+| `sst.blockCacheBytes` | `64 MiB` | SST block cache budget. |
+| `sst.compactThreads` | `2` | Background compaction thread count. |
+| `sst.codec` | `ZSTD` | SST compression codec. |
+
+If L0 stalls appear in stats, increase compaction capacity or tune file sizes. If reads miss cache frequently, consider raising `blockCacheBytes`.
+
+## Blob Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `blob.blobDir` | derived | Directory for Blob files. |
+| `blob.thresholdBytes` | engine default | Values at or above this size are stored as blobs. |
+| `blob.codec` | `NONE` | Blob compression codec. |
+| `blob.gcOnFlush` | `false` | Runs Blob GC as part of flush activity. |
+| `blob.gcOnClose` | `false` | Runs Blob GC when closing. |
+
+Blob storage keeps large values out of MemTable and SST payloads. Do not combine Blob GC with version-history assumptions unless you have verified old versions no longer need the blob files.
+
+## VersionLog Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `vlog.logPath` | derived | Version log file path. |
+| `vlog.syncMode` | `ASYNC` | Version log sync mode: `SYNC`, `ASYNC`, or `BATCHED_SYNC`. |
+| `vlog.groupN` | `128` | Max entries per grouped flush. |
+| `vlog.groupMicros` | `500` | Max grouped flush delay. |
+| `vlog.groupBytes` | `1 MiB` | Max bytes per grouped flush. |
+| `vlog.asyncMaxPendingBytes` | `64 MiB` | Backpressure limit for pending version-log data. |
+
+Enable `components.versionLogEnabled` before relying on `history()`, `getAt()`, `rollbackKey()`, or `rollbackTo()`.
+
+## Manifest And Cluster Options
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `manifest.fastMode` | `false` | Uses background batching for manifest durability work. |
+| `cluster.config` | empty | Optional durable cluster configuration. |
+| `cluster.runtimeBackendPath` | empty | Dynamic runtime provider path. |
+| `cluster.runtime` | default runtime | Runtime-only replication transport options. |
+
+Cluster support is intentionally separate from the local embedded path. Keep `components.clusterEnabled` disabled until node identity, membership, transport mode, and acknowledgement policy are explicit.
+
+## API Server Options
+
+`components.apiEnabled` starts one or more server transports from `api.backends`.
+
+| Field group | Main fields |
+|---|---|
+| Backend selection | `api.backends`, `api.serverBackendPath`, `api.httpBackendPath`, `api.tcpBackendPath`, `api.grpcBackendPath`, `api.transportBackendPath` |
+| HTTP | `api.bindHost`, `api.httpPort`, `api.httpMaxBatchItems`, `api.httpMaxScanItems`, `api.httpMaxHistoryEntries`, `api.httpMaxContentLength` |
+| TCP | `api.tcpPort`, `api.tcpIoBackend`, `api.tcpWorkerThreads`, `api.tcpAcceptQueueLimit`, `api.tcpListenBacklog`, `api.tcpReadTimeoutMs`, `api.tcpWriteTimeoutMs`, `api.tcpNoDelay`, `api.tcpKeepAlive` |
+| gRPC | `api.grpcPort`, `api.grpcWorkerThreads`, `api.grpcCompletionQueues`, `api.grpcMinPollers`, `api.grpcMaxPollers`, `api.grpcMaxConcurrentStreams`, `api.grpcResourceQuotaBytes` |
+| TLS | `api.transportMode`, `api.tls.certPath`, `api.tls.keyPath`, `api.tls.caPath`, `api.tls.psk`, `api.tls.pskIdentity`, `api.tls.verifyPeer` |
+
+The API server is useful when `AkkEngine` is acting as a local process boundary or embedded service. Library users that call `AkkEngine` directly can leave it disabled.
+
+## Suggested Presets
+
+| Use case | Important settings |
+|---|---|
+| Unit test | Disable WAL, Blob, manifest, and SST. |
+| Durable embedded DB | Set `paths.dataDir`; keep WAL, manifest, and SST enabled. |
+| Write throughput | Use `wal.syncMode = ASYNC`; tune WAL group limits; monitor pending bytes. |
+| Read-heavy cache | Enable `runtime.sstPromoteReads`; size SST block cache. |
+| Time travel | Enable `components.versionLogEnabled`; choose `vlog.syncMode` deliberately. |
+| External server | Enable `components.apiEnabled`; configure backend limits and TLS. |

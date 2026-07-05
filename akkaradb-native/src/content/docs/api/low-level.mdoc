@@ -101,6 +101,8 @@ auto db = engine::AkkEngine::open(std::move(opts));
 
 The default WAL mode is `SYNC`. `ASYNC` improves write throughput by flushing in the background. `OFF` disables WAL writes and should be reserved for temporary data or controlled benchmark scenarios.
 
+For the complete option map, including MemTable, SST, Blob, VersionLog, API server, and cluster-related fields, see [Low-Level API Options](/akkaradb-native/api/low-level/options/).
+
 ## Basic Read And Write
 
 `put()` writes or replaces a value. `remove()` writes a tombstone. Reads use `std::optional<std::vector<uint8_t>>` by default.
@@ -356,6 +358,8 @@ Useful fields include:
 | `sst.fileCount`, `sst.levels` | SST storage shape |
 | `blob.bytesOnDisk`, `blob.gcCycles` | Blob storage and GC state |
 | `vlog.indexedEntries`, `vlog.rollbackEntries` | Version history state |
+
+For the full metrics map and interpretation notes, see [Low-Level API Stats](/akkaradb-native/api/low-level/stats/).
 
 ## Operation Reference
 

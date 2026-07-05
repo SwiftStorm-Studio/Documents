@@ -1,0 +1,152 @@
+---
+title: Low-Level API Stats
+description: Metrics reference for akkaradb::engine::EngineStats.
+---
+
+`AkkEngine::stats()` returns an `akkaradb::engine::EngineStats` snapshot. The values are counters and point-in-time subsystem state; they are intended for debugging, operational dashboards, benchmarks, and sanity checks in integration tests.
+
+```cpp
+const auto stats = db->stats();
+
+const double readHitRate =
+    stats.getsTotal == 0
+        ? 0.0
+        : double(stats.getsMemtableHit + stats.getsSstHit) / double(stats.getsTotal);
+```
+
+## Top-Level Fields
+
+| Field | Meaning |
+|---|---|
+| `currentSeq` | Latest engine sequence number assigned to writes. |
+| `nodeId` | Stable node id used by local or clustered operation. |
+| `putsTotal` | Total successful top-level put calls. |
+| `removesTotal` | Total top-level remove calls. |
+| `getsTotal` | Total top-level get calls. |
+| `getsMemtableHit` | Reads served from MemTable. |
+| `getsSstHit` | Reads served from SST. |
+| `getsMiss` | Reads that did not find an active value. |
+| `existsTotal` | Existence checks. |
+| `scansTotal` | Range scan calls. |
+| `blobPutsTotal` | Writes routed through Blob storage. |
+
+The top-level read counters let you estimate whether the working set is mostly in memory, mostly in SST, or missing. Compare `getsMemtableHit`, `getsSstHit`, and `getsMiss` against `getsTotal`.
+
+## MemTable Stats
+
+| Field | Meaning |
+|---|---|
+| `memtable.shardCount` | Active MemTable shard count. |
+| `memtable.thresholdBytesPerShard` | Flush threshold configured per shard. |
+| `memtable.approxBytes` | Approximate bytes currently held in MemTable. |
+| `memtable.putsApplied` | Puts applied to MemTable internals. |
+| `memtable.removesApplied` | Tombstones applied to MemTable internals. |
+| `memtable.flushesCompleted` | Completed MemTable flushes. |
+| `memtable.bytesFlushed` | Bytes emitted through flushes. |
+
+`approxBytes` rising toward `thresholdBytesPerShard * shardCount` indicates flush pressure. A high flush count with low bytes per flush can mean thresholds are too small for the workload.
+
+## WAL Stats
+
+| Field | Meaning |
+|---|---|
+| `wal.enabled` | Whether WAL is active. |
+| `wal.shardCount` | Active WAL shard count. |
+| `wal.entriesWritten` | WAL entries written. |
+| `wal.bytesWritten` | WAL bytes written. |
+| `wal.batchesFlushed` | Grouped WAL batches flushed. |
+| `wal.syncsExecuted` | Physical sync calls executed. |
+| `wal.segmentRotations` | WAL segment rotations. |
+
+For `SYNC` durability, `syncsExecuted` should track writes more closely. For `ASYNC`, grouped flushes should reduce sync frequency while increasing batch size.
+
+## SST Stats
+
+| Field | Meaning |
+|---|---|
+| `sst.enabled` | Whether SST storage is active. |
+| `sst.levels` | Per-level file count, bytes, and budget. |
+| `sst.fileCount` | Total SST file count. |
+| `sst.bytes` | Total SST bytes. |
+| `sst.l0FileCount` | Number of files in level 0. |
+| `sst.compactionPending` | Whether compaction work is pending. |
+| `sst.compactionsCompleted` | Completed compactions. |
+| `sst.filesCompacted` | Files consumed by compaction. |
+| `sst.bytesCompactedIn` | Bytes read by compaction. |
+| `sst.bytesCompactedOut` | Bytes written by compaction. |
+| `sst.l0Stalls` | L0-related stall events. |
+
+Watch `l0FileCount`, `compactionPending`, and `l0Stalls` together. If they climb under sustained writes, the compaction side is not keeping up with flush production.
+
+Each `sst.levels` entry has:
+
+| Field | Meaning |
+|---|---|
+| `level` | LSM level number. |
+| `fileCount` | Files in that level. |
+| `bytes` | Bytes stored in that level. |
+| `budgetBytes` | Target byte budget for the level. |
+
+## Blob Stats
+
+| Field | Meaning |
+|---|---|
+| `blob.enabled` | Whether Blob storage is active. |
+| `blob.thresholdBytes` | Value-size threshold for Blob offload. |
+| `blob.blobsWritten` | Blob files written. |
+| `blob.bytesUncompressed` | Original payload bytes. |
+| `blob.bytesOnDisk` | Bytes stored on disk. |
+| `blob.blobsDeleted` | Blob files deleted. |
+| `blob.gcCycles` | Blob garbage-collection cycles. |
+
+Compare `bytesUncompressed` and `bytesOnDisk` when compression is enabled. `gcCycles` increasing without `blobsDeleted` usually means GC is running but not finding reclaimable files.
+
+## VersionLog Stats
+
+| Field | Meaning |
+|---|---|
+| `vlog.enabled` | Whether version history is active. |
+| `vlog.syncMode` | Numeric value of the version-log sync mode. |
+| `vlog.groupN` | Grouping threshold by entry count. |
+| `vlog.groupMicros` | Grouping threshold by time. |
+| `vlog.groupBytes` | Grouping threshold by bytes. |
+| `vlog.asyncMaxPendingBytes` | Pending async write budget. |
+| `vlog.indexedKeys` | Keys with indexed history. |
+| `vlog.indexedEntries` | Total indexed history entries. |
+| `vlog.rollbackEntries` | Entries produced by rollback operations. |
+| `vlog.pendingWrites` | Version-log writes not yet flushed. |
+| `vlog.pendingBytes` | Pending version-log bytes. |
+| `vlog.durableBytes` | Bytes durable in the version log. |
+| `vlog.flushThreadRunning` | Whether the async flush thread is running. |
+
+Use `pendingBytes` and `asyncMaxPendingBytes` to detect backpressure risk. `rollbackEntries` should be nonzero only when rollback APIs are used.
+
+## API Stats
+
+`stats.api` is populated when the API server component is enabled.
+
+| Group | Fields |
+|---|---|
+| HTTP state | `httpEnabled`, `httpTlsEnabled`, `httpPort`, `httpMaxBatchItems`, `httpMaxScanItems`, `httpMaxHistoryEntries`, `httpMaxContentLength` |
+| HTTP traffic | `httpConnectionsAcceptedTotal`, `httpConnectionsClosedTotal`, `httpConnectionsActive`, `httpRequestsTotal`, `httpResponsesTotal`, `httpBytesReceivedTotal`, `httpBytesSentTotal` |
+| HTTP errors | `httpProtocolErrorsTotal`, `httpErrorsTotal` |
+| HTTP batches | `httpBatchPutItemsTotal`, `httpBatchGetItemsTotal` |
+| TCP state | `tcpEnabled`, `tcpTlsEnabled`, `tcpIoBackend`, `tcpWorkerThreads`, `tcpAcceptQueueLimit`, `tcpListenBacklog`, `tcpReadTimeoutMs`, `tcpWriteTimeoutMs` |
+| TCP traffic | `tcpConnectionsAcceptedTotal`, `tcpConnectionsClosedTotal`, `tcpConnectionsActive`, `tcpRequestsTotal`, `tcpResponsesTotal`, `tcpBytesReceivedTotal`, `tcpBytesSentTotal` |
+| TCP queue/backpressure | `tcpAcceptQueueDepth`, `tcpAcceptQueuePeakDepth`, `tcpAcceptQueueRejectedTotal`, `tcpAcceptQueueExpiredTotal`, `tcpBackpressureFlushesTotal`, `tcpBackpressureDisconnectsTotal` |
+| TCP errors/batches | `tcpProtocolErrorsTotal`, `tcpCrcErrorsTotal`, `tcpPipelineBatchesTotal`, `tcpBatchPutItemsTotal`, `tcpBatchGetItemsTotal` |
+| gRPC state | `grpcEnabled`, `grpcTlsEnabled`, `grpcPort`, `grpcWorkerThreads`, `grpcCompletionQueues`, `grpcMinPollers`, `grpcMaxPollers`, `grpcMaxConcurrentStreams`, `grpcResourceQuotaBytes` |
+| gRPC traffic | `grpcRequestsTotal`, `grpcResponsesTotal`, `grpcActiveRequests`, `grpcErrorsTotal`, `grpcBatchPutItemsTotal`, `grpcBatchGetItemsTotal` |
+
+The API metrics are useful for boundary tests and service deployments. Embedded-only users can ignore them when `api.enabled` is false.
+
+## Practical Checks
+
+| Check | Signal |
+|---|---|
+| Read path health | `getsMemtableHit + getsSstHit` should explain most of `getsTotal` unless misses are expected. |
+| Flush pressure | `memtable.approxBytes` near threshold and frequent flushes indicate write pressure. |
+| Compaction pressure | Rising `sst.l0FileCount`, `compactionPending`, or `l0Stalls`. |
+| WAL grouping | In async mode, `batchesFlushed` should be meaningfully lower than `entriesWritten`. |
+| Blob growth | `blob.bytesOnDisk` growing faster than live data may require GC review. |
+| History backlog | `vlog.pendingBytes` approaching `vlog.asyncMaxPendingBytes`. |
