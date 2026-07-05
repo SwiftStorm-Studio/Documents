@@ -14,6 +14,7 @@ export default defineConfig({
 			title: 'AKkaraDB Native',
 			customCss: ['./src/styles/oled.css'],
 			components: {
+				Header: './src/components/Header.astro',
 				ThemeProvider: './src/components/ThemeProvider.astro',
 				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
