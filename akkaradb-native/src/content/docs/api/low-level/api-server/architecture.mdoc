@@ -1,0 +1,196 @@
+---
+title: API Server Architecture
+description: Internal shape of the AkkEngine API server transports, framing, limits, and lifecycle.
+---
+
+Use this page when you need to understand how the API server maps network requests to `AkkEngine`. For startup and client examples, see [API Server Usage](/akkaradb-native/api/low-level/api-server/usage/).
+
+## Runtime Shape
+
+The server code lives under `akkara/akkserver/` and is licensed separately under AGPLv3. Check that boundary before packaging or redistributing server-enabled builds.
+
+At engine startup, `AkkEngine::open()` checks `components.apiEnabled`. If enabled, it loads or uses the API server backend, creates an aggregate server for the configured transports, and starts it after the storage engine components are ready.
+
+The server lifetime follows the engine lifetime. It starts during `AkkEngine::open()` and shuts down when `close()` runs or the engine is destroyed.
+
+## Transport Backends
+
+| Backend | Role |
+|---|---|
+| HTTP | Human-friendly smoke tests, scripts, and simple service boundaries. |
+| TCP | Compact AK5 binary protocol for high-throughput clients. |
+| gRPC | Typed RPC surface when Protobuf/gRPC support is available. |
+
+Each transport maps requests to the same underlying `AkkEngine` operations. The API server does not add schema awareness: keys and values remain raw bytes.
+
+## HTTP Binary Responses
+
+HTTP response bodies use little-endian binary encoding unless the endpoint explicitly returns text.
+
+| Endpoint | Body |
+|---|---|
+| `/v1/exists` | `[exists:u8]`, where `1` means present and `0` means absent. |
+| `/v1/count` | `[count:u64le]`. |
+| `/v1/scan` | `[count:u32le][truncated:u8]{row}*`. |
+| `/v1/history` | `[count:u32le][truncated:u8]{entry}*`. |
+| `/v1/batchGet` | `[count:u32le]{[status:u8][value_len:u32le][value bytes]}*`. |
+| `/v1/stats` | Compact little-endian `EngineStats` snapshot. |
+
+Scan rows use:
+
+```text
+[key_len:u16le][value_len:u32le][key bytes][value bytes]
+```
+
+History entries use:
+
+```text
+[seq:u64le][source_node_id:u64le][timestamp_ns:u64le][flags:u32le][value_len:u32le][value bytes]
+```
+
+`truncated` is `1` when the server stopped because the configured or requested limit was reached. Increase `limit` or perform a follow-up range request when you need more rows.
+
+## HTTP Streaming
+
+Streaming bodies begin with a 5-byte prelude:
+
+| Stream | Prelude |
+|---|---|
+| scan | `AKKS\x01` |
+| history | `AKKH\x01` |
+
+After the prelude, the de-chunked body is a sequence of frames:
+
+```text
+[frame_type:u8][payload_len:u32le][payload bytes]
+```
+
+Frame type `1` is an item. For scan, the item payload is the same row shape used by non-streaming scan. For history, the item payload is the same entry shape used by non-streaming history, without the outer `count` and `truncated` fields.
+
+Frame type `2` terminates the stream:
+
+```text
+[emitted_count:u32le][truncated:u8]
+```
+
+HTTP streaming changes only how the server sends the result. It does not change the engine-side snapshot semantics of the operation.
+
+## TCP Protocol
+
+The TCP transport uses AK5 binary frames. Request frames start with a 16-byte header:
+
+```text
+char[4] magic = "AK5Q"
+u8      version = 2
+u8      opcode
+u32     request_id
+u16     key_len
+u32     val_len
+```
+
+Response frames start with a 13-byte header:
+
+```text
+char[4] magic = "AK5S"
+u8      status
+u32     request_id
+u32     val_len
+```
+
+Each TCP request is:
+
+```text
+[request header][key bytes][value bytes][crc32c:u32le]
+```
+
+The request CRC32C covers `key bytes + value bytes`. Each response is:
+
+```text
+[response header][value bytes][crc32c:u32le]
+```
+
+The response CRC32C covers only `value bytes`.
+
+## TCP Operations
+
+| Opcode | Operation |
+|---:|---|
+| `0x01` | `GET` |
+| `0x02` | `PUT` |
+| `0x03` | `REMOVE` |
+| `0x04` | `GET_AT` |
+| `0x05` | `BATCH_PUT` |
+| `0x06` | `BATCH_GET` |
+| `0x07` | `PING` |
+| `0x08` | `EXISTS` |
+| `0x09` | `COUNT` |
+| `0x0A` | `SCAN` |
+| `0x0B` | `HISTORY` |
+| `0x0C` | `ROLLBACK_TO` |
+| `0x0D` | `ROLLBACK_KEY` |
+| `0x0E` | `FORCE_SYNC` |
+| `0x0F` | `FORCE_FLUSH` |
+| `0x10` | `STATS` |
+| `0x11` | `SCAN_STREAM` |
+| `0x12` | `HISTORY_STREAM` |
+
+Status values are:
+
+| Status | Meaning |
+|---:|---|
+| `0x00` | OK |
+| `0x01` | Not found |
+| `0xFF` | Error |
+
+`request_id` is echoed in the response. Use it to correlate responses when a client pipelines multiple requests on one connection.
+
+## TCP Payload Conventions
+
+| Operation | Request key | Request value |
+|---|---|---|
+| `GET`, `PUT`, `REMOVE`, `EXISTS`, `HISTORY` | target key | operation payload or empty |
+| `GET_AT`, `ROLLBACK_KEY` | target key | `[seq:u64le]` |
+| `ROLLBACK_TO` | empty | `[seq:u64le]` |
+| `COUNT` | `startKey` | `endKey` |
+| `SCAN` | `startKey` | `[limit:u32le][endKey bytes]`, where `limit = 0` means unbounded |
+| `BATCH_PUT`, `BATCH_GET` | empty | batch payload |
+| `FORCE_SYNC`, `FORCE_FLUSH`, `STATS`, `PING` | empty | empty |
+
+TCP scan responses use `[count:u32le][truncated:u8]{row}*`. TCP history responses use `[count:u32le]{entry}*`; unlike HTTP history, the non-streaming TCP history payload does not include a `truncated` byte.
+
+`SCAN_STREAM` and `HISTORY_STREAM` send multiple `AK5S` responses with the same `request_id`. Each response value is one stream frame:
+
+```text
+[frame_type:u8][payload_len:u32le][payload bytes]
+```
+
+Frame type `1` is an item. Frame type `2` is terminal and carries `[emitted_count:u32le][truncated:u8]`.
+
+## gRPC Transport
+
+The gRPC transport exposes unary calls for the same engine operations, plus server-streaming calls for scans and history. The service name is `akkaradb.grpcapi.v1.AkkaraDB`.
+
+Unary calls cover `Ping`, `Put`, `Get`, `Remove`, `Exists`, `Count`, `Scan`, `GetAt`, `History`, `RollbackTo`, `RollbackKey`, `BatchPut`, `BatchGet`, `ForceSync`, `ForceFlush`, and `Stats`. Streaming calls cover `ScanStream` and `HistoryStream`.
+
+Availability is build-dependent. When Protobuf/gRPC support is not present, the gRPC backend is not available as a real server transport. gRPC maps `api.grpcPort`, `api.grpcWorkerThreads`, `api.grpcCompletionQueues`, `api.grpcMinPollers`, `api.grpcMaxPollers`, `api.grpcMaxConcurrentStreams`, `api.grpcResourceQuotaBytes`, `api.grpcMaxBatchItems`, `api.grpcMaxScanItems`, and `api.grpcMaxHistoryEntries`.
+
+When `api.transportMode == TLS`, gRPC uses `api.tls.certPath`, `api.tls.keyPath`, and `api.tls.caPath`. Client certificates are required when `api.tls.verifyPeer` is true and a CA path is configured.
+
+## Limits And Tuning
+
+| Option | Applies to | Notes |
+|---|---|---|
+| `api.httpMaxBatchItems` | HTTP batch endpoints | Rejects oversized batch bodies. |
+| `api.httpMaxScanItems` | HTTP scan | Caps rows returned or streamed per request. |
+| `api.httpMaxHistoryEntries` | HTTP history | Caps entries returned or streamed per request. |
+| `api.httpMaxContentLength` | HTTP request body | Protects memory use for POST bodies. |
+| `api.tcpWorkerThreads` | TCP | `0` uses automatic behavior. |
+| `api.tcpAcceptQueueLimit` | TCP | Caps accepted sockets waiting for a worker. |
+| `api.tcpAcceptQueueTimeoutMs` | TCP | Drops queued sockets that wait too long; `0` disables timeout. |
+| `api.tcpPipelineBatchLimit` | TCP | Controls how many pipelined requests are processed in a batch. |
+| `api.tcpMaxBatchItems` | TCP batch endpoints | Rejects oversized batch payloads. |
+| `api.tcpMaxPendingResponseBytes` | TCP/gRPC | Backpressure limit; also feeds gRPC send/receive message size. |
+| `api.tcpReadTimeoutMs` | TCP | Idle or partial-frame read timeout; `0` disables timeout. |
+| `api.tcpWriteTimeoutMs` | TCP | Response write timeout; `0` disables timeout. |
+
+Start with defaults for local development. Tune limits only after measuring request sizes, concurrency, and response backpressure.

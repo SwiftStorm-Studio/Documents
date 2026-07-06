@@ -1,0 +1,21 @@
+---
+title: Cluster
+description: Entry point for AkkEngine cluster configuration and replication runtime docs.
+---
+
+Cluster support lets `AkkEngine` run with a replication runtime. It is a low-level engine feature, not a complete distributed database control plane: the application or operator still decides membership, startup role, primary target, secure identity, traffic routing, and failover procedure.
+
+Use it when you want engine-level replication between native nodes and are comfortable managing topology outside the storage engine. If you need automatic leader election, split-brain-safe failover, online resharding, or a managed cluster API, those pieces need to be built above this layer.
+
+## Read By Goal
+
+| Goal | Page |
+|---|---|
+| Configure nodes and start primary/replica processes | [Cluster Usage](/akkaradb-native/api/low-level/cluster/usage/) |
+| Understand runtime parts, routing, replication frames, and limitations | [Cluster Architecture](/akkaradb-native/api/low-level/cluster/architecture/) |
+
+## Scope
+
+The current Cluster layer is best treated as an engine-level replication primitive. It gives you explicit placement, roles, acknowledgement policy, and replication transport, but it does not provide an external control plane.
+
+Production deployments should add their own membership management, failover, traffic routing, snapshot transfer, health checks, and migration workflow.

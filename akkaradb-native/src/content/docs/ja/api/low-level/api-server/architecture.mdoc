@@ -1,0 +1,196 @@
+---
+title: API サーバーのアーキテクチャ
+description: AkkEngine API サーバーの通信方式、フレーミング、制限値、寿命管理。
+---
+
+このページは、API サーバーが network request をどのように `AkkEngine` へ対応付けるかを理解したい場合に読むページです。起動方法とクライアントからの呼び出し例は [API サーバーの使い方](/akkaradb-native/ja/api/low-level/api-server/usage/) に分けています。
+
+## 実行時の構造
+
+API サーバーのコードは `akkara/akkserver/` にあり、AGPLv3 で別ライセンスになっています。サーバー有効ビルドを配布する場合は、この境界を確認してください。
+
+エンジン起動時、`AkkEngine::open()` は `components.apiEnabled` を確認します。有効であれば、API server backend を読み込むか既存の factory を使い、設定された通信方式向けの aggregate server を作成し、storage engine component の準備が終わった後に起動します。
+
+サーバーの寿命はエンジンの寿命に従います。`AkkEngine::open()` の途中で起動し、`close()` またはエンジン破棄時に停止します。
+
+## 通信方式バックエンド
+
+| Backend | 役割 |
+|---|---|
+| HTTP | 手元での確認、スクリプト、簡単な service boundary。 |
+| TCP | 高スループットクライアント向けの compact な AK5 binary protocol。 |
+| gRPC | Protobuf/gRPC support がある場合の typed RPC surface。 |
+
+どの通信方式も、最終的には同じ `AkkEngine` operation へ対応付けられます。API サーバーは schema awareness を追加しません。キーと値は raw bytes のままです。
+
+## HTTP バイナリレスポンス
+
+HTTP response body は、明示的に text を返す endpoint を除き、little-endian の binary encoding です。
+
+| Endpoint | Body |
+|---|---|
+| `/v1/exists` | `[exists:u8]`。`1` が存在、`0` が不存在。 |
+| `/v1/count` | `[count:u64le]`。 |
+| `/v1/scan` | `[count:u32le][truncated:u8]{row}*`。 |
+| `/v1/history` | `[count:u32le][truncated:u8]{entry}*`。 |
+| `/v1/batchGet` | `[count:u32le]{[status:u8][value_len:u32le][value bytes]}*`。 |
+| `/v1/stats` | compact little-endian `EngineStats` snapshot。 |
+
+scan row は次の形です。
+
+```text
+[key_len:u16le][value_len:u32le][key bytes][value bytes]
+```
+
+history entry は次の形です。
+
+```text
+[seq:u64le][source_node_id:u64le][timestamp_ns:u64le][flags:u32le][value_len:u32le][value bytes]
+```
+
+`truncated` が `1` の場合、設定値またはリクエストされた `limit` に到達して途中で切られています。続きが必要な場合は、`limit` を増やすか、後続の range request を組み立てます。
+
+## HTTP ストリーミング
+
+streaming body は 5 byte の prelude から始まります。
+
+| Stream | Prelude |
+|---|---|
+| scan | `AKKS\x01` |
+| history | `AKKH\x01` |
+
+chunk を展開した後の body は、次の frame 列です。
+
+```text
+[frame_type:u8][payload_len:u32le][payload bytes]
+```
+
+frame type `1` は item です。scan の item payload は非 streaming scan と同じ row shape です。history の item payload は非 streaming history と同じ entry shape ですが、外側の `count` と `truncated` は付きません。
+
+frame type `2` は終端 frame です。
+
+```text
+[emitted_count:u32le][truncated:u8]
+```
+
+HTTP streaming はサーバーからの返し方を変えるだけです。engine 側の snapshot semantics を変えるものではありません。
+
+## TCP プロトコル
+
+TCP 通信方式は AK5 binary frame を使います。request frame は 16 byte header から始まります。
+
+```text
+char[4] magic = "AK5Q"
+u8      version = 2
+u8      opcode
+u32     request_id
+u16     key_len
+u32     val_len
+```
+
+response frame は 13 byte header から始まります。
+
+```text
+char[4] magic = "AK5S"
+u8      status
+u32     request_id
+u32     val_len
+```
+
+TCP request は次の形です。
+
+```text
+[request header][key bytes][value bytes][crc32c:u32le]
+```
+
+request CRC32C は `key bytes + value bytes` を対象にします。response は次の形です。
+
+```text
+[response header][value bytes][crc32c:u32le]
+```
+
+response CRC32C は value bytes だけを対象にします。
+
+## TCP 操作
+
+| Opcode | Operation |
+|---:|---|
+| `0x01` | `GET` |
+| `0x02` | `PUT` |
+| `0x03` | `REMOVE` |
+| `0x04` | `GET_AT` |
+| `0x05` | `BATCH_PUT` |
+| `0x06` | `BATCH_GET` |
+| `0x07` | `PING` |
+| `0x08` | `EXISTS` |
+| `0x09` | `COUNT` |
+| `0x0A` | `SCAN` |
+| `0x0B` | `HISTORY` |
+| `0x0C` | `ROLLBACK_TO` |
+| `0x0D` | `ROLLBACK_KEY` |
+| `0x0E` | `FORCE_SYNC` |
+| `0x0F` | `FORCE_FLUSH` |
+| `0x10` | `STATS` |
+| `0x11` | `SCAN_STREAM` |
+| `0x12` | `HISTORY_STREAM` |
+
+status value は次の通りです。
+
+| Status | Meaning |
+|---:|---|
+| `0x00` | OK |
+| `0x01` | Not found |
+| `0xFF` | Error |
+
+`request_id` は response へそのまま返されます。1 つの接続で複数 request を pipeline 処理する場合、response の対応付けに使います。
+
+## TCP ペイロード規約
+
+| Operation | Request key | Request value |
+|---|---|---|
+| `GET`, `PUT`, `REMOVE`, `EXISTS`, `HISTORY` | target key | operation payload または空 |
+| `GET_AT`, `ROLLBACK_KEY` | target key | `[seq:u64le]` |
+| `ROLLBACK_TO` | empty | `[seq:u64le]` |
+| `COUNT` | `startKey` | `endKey` |
+| `SCAN` | `startKey` | `[limit:u32le][endKey bytes]`。`limit = 0` は無制限 |
+| `BATCH_PUT`, `BATCH_GET` | empty | batch payload |
+| `FORCE_SYNC`, `FORCE_FLUSH`, `STATS`, `PING` | empty | empty |
+
+TCP の scan response は `[count:u32le][truncated:u8]{row}*` です。TCP の history response は `[count:u32le]{entry}*` です。HTTP history と違い、非 streaming TCP history には `truncated` byte がありません。
+
+`SCAN_STREAM` と `HISTORY_STREAM` は、同じ `request_id` を持つ複数の `AK5S` response を送ります。各 response の value が 1 つの stream frame です。
+
+```text
+[frame_type:u8][payload_len:u32le][payload bytes]
+```
+
+frame type `1` は item、frame type `2` は終端です。終端 payload は `[emitted_count:u32le][truncated:u8]` です。
+
+## gRPC 通信方式
+
+gRPC 通信方式は、同じエンジン操作に対応する unary call と、scan/history 向けの server streaming call を提供します。service name は `akkaradb.grpcapi.v1.AkkaraDB` です。
+
+Unary call は `Ping`、`Put`、`Get`、`Remove`、`Exists`、`Count`、`Scan`、`GetAt`、`History`、`RollbackTo`、`RollbackKey`、`BatchPut`、`BatchGet`、`ForceSync`、`ForceFlush`、`Stats` に対応します。Streaming call は `ScanStream` と `HistoryStream` です。
+
+gRPC は build dependent です。Protobuf/gRPC support がない場合、gRPC backend は実際の server transport として利用できません。gRPC には、`api.grpcPort`、`api.grpcWorkerThreads`、`api.grpcCompletionQueues`、`api.grpcMinPollers`、`api.grpcMaxPollers`、`api.grpcMaxConcurrentStreams`、`api.grpcResourceQuotaBytes`、`api.grpcMaxBatchItems`、`api.grpcMaxScanItems`、`api.grpcMaxHistoryEntries` が反映されます。
+
+`api.transportMode == TLS` の場合、gRPC は `api.tls.certPath`、`api.tls.keyPath`、`api.tls.caPath` を使います。`api.tls.verifyPeer` が true で CA path が設定されている場合、client certificate が要求されます。
+
+## 制限値とチューニング
+
+| Option | 対象 | メモ |
+|---|---|---|
+| `api.httpMaxBatchItems` | HTTP batch endpoints | 大きすぎる batch body を拒否します。 |
+| `api.httpMaxScanItems` | HTTP scan | 1 request で返す、または stream する row 数を制限します。 |
+| `api.httpMaxHistoryEntries` | HTTP history | 1 request で返す、または stream する history entry 数を制限します。 |
+| `api.httpMaxContentLength` | HTTP request body | POST body による memory usage を制限します。 |
+| `api.tcpWorkerThreads` | TCP | `0` は automatic behavior です。 |
+| `api.tcpAcceptQueueLimit` | TCP | worker 待ちの accepted socket 数を制限します。 |
+| `api.tcpAcceptQueueTimeoutMs` | TCP | 待ちすぎた queued socket を落とします。`0` で timeout を無効化します。 |
+| `api.tcpPipelineBatchLimit` | TCP | pipelined request をまとめて処理する上限です。 |
+| `api.tcpMaxBatchItems` | TCP batch endpoints | 大きすぎる batch payload を拒否します。 |
+| `api.tcpMaxPendingResponseBytes` | TCP/gRPC | backpressure limit です。gRPC の send/receive message size にも使われます。 |
+| `api.tcpReadTimeoutMs` | TCP | idle または partial frame の read timeout です。`0` で無効化します。 |
+| `api.tcpWriteTimeoutMs` | TCP | response write timeout です。`0` で無効化します。 |
+
+ローカル開発では既定値から始めるのが自然です。制限値は、request size、同時接続数、response backpressure を測ってから調整してください。

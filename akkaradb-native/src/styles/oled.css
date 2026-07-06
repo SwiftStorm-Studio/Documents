@@ -58,8 +58,8 @@
 	}
 
 	:root[data-theme='oled'] ::selection {
-		color: var(--sl-color-black);
-		background: var(--sl-color-accent-high);
+		color: var(--sl-color-white);
+		background: var(--sl-color-bg-accent);
 	}
 
 	:root[data-theme='oled'] .sl-markdown-content a:not(:where(.not-content *)),

@@ -1,0 +1,143 @@
+---
+title: API Server Usage
+description: How to enable the AkkEngine API server and call it over HTTP, TCP, or gRPC.
+---
+
+Use this page when you want to start the API server and call `AkkEngine` from another process. For internal transport layout, framing, limits, and server lifetime, see [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/).
+
+## Enable The Server
+
+Enable the component before opening the engine. `api.bindHost` is required when `components.apiEnabled` is `true`.
+
+```cpp
+#include "akk/engine/AkkEngine.hpp"
+
+#include <utility>
+
+namespace engine = akkaradb::engine;
+
+int main() {
+    engine::AkkEngineOptions opts;
+    opts.paths.dataDir = "data/api";
+
+    opts.components.apiEnabled = true;
+    opts.api.bindHost = "127.0.0.1";
+    opts.api.backends = {
+        engine::AkkEngineOptions::ApiBackend::HTTP,
+    };
+    opts.api.httpPort = 7070;
+    opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::PLAIN;
+
+    auto db = engine::AkkEngine::open(std::move(opts));
+
+    // The HTTP listener is running while the engine is open.
+    db->close();
+}
+```
+
+When `api.backends` is empty, the aggregate server starts every transport backend compiled into the current build. In most local builds this means HTTP and TCP. gRPC is included only when the build has the real Protobuf/gRPC backend enabled.
+
+For public or shared environments, prefer explicit backends and TLS. `PLAIN` is convenient for local development, but it should not be treated as a secure deployment default.
+
+## Choose A Transport
+
+| Transport | Best fit |
+|---|---|
+| HTTP | Manual testing, local tools, scripting, and simple service integration. |
+| TCP | High-throughput clients that can implement AK5 binary framing directly. |
+| gRPC | Typed service clients when the build includes the gRPC backend. |
+
+All transports expose byte-oriented key/value operations. For first integration work, start with HTTP. Move to TCP or gRPC only when the client needs lower overhead or generated service bindings.
+
+## HTTP Quick Check
+
+With the server running on `127.0.0.1:7070`, basic operations can be tested with `curl`.
+
+```powershell
+curl -s -X POST "http://127.0.0.1:7070/v1/put?key=user:1" --data "Alice"
+curl -s "http://127.0.0.1:7070/v1/get?key=user:1"
+curl -s "http://127.0.0.1:7070/v1/ping"
+curl -s -X DELETE "http://127.0.0.1:7070/v1/remove?key=user:1"
+```
+
+The key is passed through the query string and percent-decoded by the server. The request body for `/v1/put` is stored as the raw value. `/v1/get` returns the raw value bytes or `404` when the key is missing.
+
+## HTTP Endpoints
+
+| Method | Path | Parameters | Result |
+|---|---|---|---|
+| `GET` | `/v1/ping` | none | Text `pong`. |
+| `POST` | `/v1/put` | `key` | Stores the request body as the value. |
+| `POST` | `/v1/putHinted` | `key`, `fp64`, `miniKey` | Stores a value with caller-provided key fingerprints. |
+| `GET` | `/v1/get` | `key` | Returns raw value bytes or `404`. |
+| `DELETE` | `/v1/remove` | `key` | Writes a tombstone for the key. |
+| `DELETE` | `/v1/removeHinted` | `key`, `fp64`, `miniKey` | Removes a key with caller-provided key fingerprints. |
+| `GET` | `/v1/exists` | `key` | Returns one byte: `0` or `1`. |
+| `GET` | `/v1/count` | `start`, `end` | Returns a little-endian `u64` count for `[start, end)`. |
+| `GET` | `/v1/scan` | `start`, `end`, optional `limit`, optional `stream` | Returns scan rows as a binary payload or chunked stream. |
+| `GET` | `/v1/getAt` | `key`, `seq` | Returns historical value bytes or `404`. |
+| `GET` | `/v1/history` | `key`, optional `stream` | Returns version history as a binary payload or chunked stream. |
+| `POST` | `/v1/rollbackTo` | `seq` | Rolls the whole engine back to a sequence. |
+| `POST` | `/v1/rollbackKey` | `key`, `seq` | Rolls one key back to a sequence. |
+| `POST` | `/v1/batchPut` | binary body | Stores multiple key/value entries. |
+| `POST` | `/v1/batchGet` | binary body | Returns one result per key. |
+| `POST` | `/v1/forceSync` | none | Forces durable state synchronization. |
+| `POST` | `/v1/forceFlush` | none | Flushes MemTable state toward SST storage. |
+| `POST` | `/v1/runBlobGc` | none | Runs Blob garbage collection. |
+| `GET` | `/v1/stats` | none | Returns a compact binary stats snapshot. |
+
+`putHinted` and `removeHinted` are hot-path endpoints for callers that already computed key fingerprints. Most clients should start with `put` and `remove`.
+
+## Batch Calls
+
+`batchPut` request bodies:
+
+```text
+[count:u32le]
+repeat count:
+  [key_len:u32le][value_len:u32le][key bytes][value bytes]
+```
+
+`batchGet` request bodies:
+
+```text
+[count:u32le]
+repeat count:
+  [key_len:u32le][key bytes]
+```
+
+`batchGet` responses:
+
+```text
+[count:u32le]
+repeat count:
+  [status:u8][value_len:u32le][value bytes]
+```
+
+The response status values match the TCP status enum: `0x00` is OK, `0x01` is not found, and `0xFF` is error. Batch request item count is capped by `api.httpMaxBatchItems`.
+
+## Streaming Calls
+
+`/v1/scan` and `/v1/history` switch to chunked streaming when `stream` is truthy. Empty, `0`, `false`, `off`, and `no` are false; other non-empty values are true.
+
+Use streaming when the client can process rows incrementally and does not need the whole response buffered before it starts work. The wire format is described in [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/#http-streaming).
+
+## TLS And Exposure
+
+API server TLS is controlled by `api.transportMode` and `api.tls`. The same transport mode applies to enabled API transports.
+
+```cpp
+opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::TLS;
+opts.api.tls.certPath = "certs/server.crt";
+opts.api.tls.keyPath = "certs/server.key";
+opts.api.tls.caPath = "certs/ca.crt";
+opts.api.tls.verifyPeer = true;
+```
+
+Bind to `127.0.0.1` for local development. Bind to `0.0.0.0` or an external interface only after choosing TLS, request limits, and an operational access model deliberately.
+
+## Error Handling
+
+Expected absence is not an exception. HTTP `GET` returns `404` for a missing key; TCP and gRPC return the equivalent not-found status.
+
+Malformed requests, invalid payloads, storage failures, and closed-engine access are errors. HTTP returns `400` for malformed requests, `404` for unknown routes or missing keys, and `500` when the underlying engine operation throws.

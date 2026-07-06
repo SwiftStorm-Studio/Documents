@@ -5,7 +5,7 @@ Static documentation host for `docs.swiftstorm.dev`.
 ## Layout
 
 - `/` is a small documentation navigation page.
-- `/akkaradb-native/` contains the AKkaraDB Native Starlight documentation.
+- `/akkaradb-native/` contains the AkkaraDB Native Starlight documentation.
 
 ## Build
 

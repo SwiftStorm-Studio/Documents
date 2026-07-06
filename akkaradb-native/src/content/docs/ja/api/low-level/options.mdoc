@@ -147,6 +147,8 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 
 クラスタ設定はローカル組み込み用途とは分けて考えます。ノード ID、メンバーシップ、通信方式、ACK ポリシーが明確になるまでは `components.clusterEnabled` は無効のままにしてください。
 
+実行時ロール、レプリケーションモード、起動例は、[Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。ルーティング、レプリケーションの流れ、通信形式は、[Cluster のアーキテクチャ](/akkaradb-native/ja/api/low-level/cluster/architecture/) に分けています。
+
 ## API サーバーオプション
 
 `components.apiEnabled` を有効にすると、`api.backends` で指定した通信層が起動します。プロセス内から直接 `AkkEngine` を呼ぶだけなら、無効のままで問題ありません。
@@ -211,7 +213,7 @@ TLS 設定:
 
 API サーバーは、`AkkEngine` をプロセス境界や組み込みサービスとして公開したい場合に使います。ライブラリとして直接 `AkkEngine` を呼ぶだけなら無効のままで問題ありません。
 
-起動例、HTTP エンドポイント、TCP フレーミングは、[低レベル API の API サーバー](/akkaradb-native/ja/api/low-level/api-server/) に分けています。
+起動例と HTTP エンドポイントは、[API サーバーの使い方](/akkaradb-native/ja/api/low-level/api-server/usage/) に分けています。TCP フレーミングと通信方式の内部構造は、[API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/) に分けています。
 
 ## 推奨プリセット
 

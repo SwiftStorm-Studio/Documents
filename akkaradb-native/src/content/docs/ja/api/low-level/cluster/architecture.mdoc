@@ -1,0 +1,152 @@
+---
+title: Cluster のアーキテクチャ
+description: AkkEngine Cluster の実行時部品、ルーティング、レプリケーションフロー、通信形式、制約。
+---
+
+このページは、Cluster runtime の内部構造を理解したい場合に読むページです。設定と起動例は [Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。
+
+## 実行時の部品
+
+Cluster 実行層は、大きく 3 つの部品で構成されます。
+
+| 部品 | 役割 |
+|---|---|
+| `ClusterConfig` | メンバー構成、配置モード、ノードの能力、データ/API ポート、レプリケーションポート、ACK ポリシーを保持します。 |
+| `ClusterManager` | 明示された起動オプションからローカルノードの役割を決め、Cluster 関連の記録を残します。 |
+| `ClusterRuntime` | Primary ならレプリケーションサーバー、Replica ならレプリケーションクライアントを起動します。 |
+
+ノードが `PRIMARY` として起動すると、設定されたレプリケーションポートで待ち受け、ローカル書き込みのレコードと Blob ペイロードを接続中の Replica へ送ります。`REPLICA` として起動すると、指定された Primary に接続し、受信したフレームをエンジンのコールバック経由で適用します。
+
+現在の実行層は Primary を自動選出しません。`MIRROR` と `STRIPE` では、`NodeStartupRole::AUTO` は起動時に拒否されます。
+
+## 設定の検証
+
+`ClusterConfig` は、構築時と読み込み時に内容を検証します。
+
+| ルール | 失敗する例 |
+|---|---|
+| node id は一意で、0 ではないこと。 | `nodeId == 0`、または重複した id。 |
+| host は空ではないこと。 | 空の `NodeInfo::host`。 |
+| capability は既知の flag だけであること。 | `COORDINATOR_ELIGIBLE | DATA_BEARING` 以外の bit。 |
+| Cluster モードにはデータ保持ノードが必要。 | `MIRROR` / `STRIPE` で `DATA_BEARING` ノードがない。 |
+| Cluster モードには coordinator 候補が必要。 | `MIRROR` / `STRIPE` で `COORDINATOR_ELIGIBLE` ノードがない。 |
+| quorum は明示すること。 | `AckPolicyMode::QUORUM` で `quorum == 0`。 |
+
+`ClusterConfig` は compact な CRC 付きバイナリファイルで、magic は `AKC5`、version は `1` です。`ClusterConfig::save()` は、書き込み前に検証し、一時ファイル経由で保存します。`ClusterConfig::load()` は magic、version、ファイル長、CRC を確認し、検証済みの config を返します。
+
+## ルーティング
+
+`ClusterRouter` は `ClusterConfig` だけを見る純粋なメモリ上のルーターです。ネットワーク I/O は行わず、ノードが現在 healthy かどうかも見ません。
+
+| メソッド | 挙動 |
+|---|---|
+| `writeTargets(key)` | その key の書き込み先ノードを返します。 |
+| `readCandidates(key)` | その key を読める候補ノードを返します。現在の実装では write placement と同じです。 |
+
+`MIRROR` では、すべてのデータ保持ノードを返します。`STRIPE` では、rendezvous hashing で決まる 1 つの所有ノードを返します。Cluster モードでデータ保持ノードがない場合、routing は例外を投げます。
+
+エンジン内のレプリケーション経路は、現在の Primary 書き込みを接続中 Replica へ送るものです。クライアントからのリクエストをどのプロセスへ送るかは、外部のルーターや運用側で決める必要があります。
+
+## レプリケーションの流れ
+
+Primary は主に 2 種類のデータを送ります。
+
+| メッセージ | 意味 |
+|---|---|
+| `ENTRY` | `PUT` または `REMOVE` のキー/値変更。 |
+| `BLOB_PUT` | Blob 参照に対応する外部 Blob の内容。 |
+
+`AkkEngine::put()` と `putHinted()` は sequence を確保し、ローカルへ書き込んだ後に `shipEntry()` を呼びます。Blob manager によって大きな値が外部化された場合は、`shipBlob()` でも送信されます。`remove()` は `ReplOpType::REMOVE` の `ENTRY` として表現されます。
+
+Replica 側では、`ENTRY` フレームがエンジンの apply callback を呼びます。WAL や version log が有効であればそこへ append し、memtable に適用し、ローカル sequence を進めます。`BLOB_PUT` は、Blob manager が有効な場合に Blob 内容を書き込みます。
+
+## Catch-up の範囲
+
+ハンドシェイク時、Replica は次の payload を送ります。
+
+```text
+[nodeId:u64][lastSeq:u64][role:u8][reserved:u8]
+```
+
+Primary は次の payload を返します。
+
+```text
+[nodeId:u64][currentSeq:u64][role:u8][reserved:u8]
+```
+
+Primary は直近 `4096` 個の entry frame をメモリに保持します。Replica が接続すると、Replica の `lastSeq` より新しい buffered entry が送られます。
+
+これは短い catch-up window であり、永続的なログ配送ではありません。Blob frame はこの buffer には保持されません。Replica がこのメモリ上の範囲を超えて遅れた場合は、再接続前に外部の snapshot/copy 手順で追いつかせる必要があります。
+
+## ACK の挙動
+
+Replica は、設定された stage に対してだけ ACK frame を送ります。Primary は最大で約 5 秒待ち、50 ms 間隔で条件を確認します。期限までに条件を満たさない場合、現在の実装では例外を投げずに wait から戻ります。
+
+Blob frame は Replica へ送られますが、entry ACK ポリシーの待機対象にはなりません。
+
+## 通信形式
+
+レプリケーションは TCP frame で行われます。整数はすべて little-endian です。外側の frame は次の形です。
+
+```text
+[magic:u32 = "AKR5"][type:u8][flags:u8][payloadLen:u32][payloadCrc32c:u32][payload]
+```
+
+CRC は payload だけを対象にします。対応している message type は次の通りです。
+
+| Type | Value | 方向 |
+|---|---:|---|
+| `CLIENT_HELLO` | `0x01` | Replica から Primary |
+| `SERVER_HELLO` | `0x02` | Primary から Replica |
+| `ENTRY` | `0x10` | Primary から Replica |
+| `BLOB_PUT` | `0x11` | Primary から Replica |
+| `ACK` | `0x12` | Replica から Primary |
+| `READ_REQUEST` | `0x20` | 予約済み |
+| `READ_RESPONSE` | `0x21` | 予約済み |
+
+`ENTRY` payload は次の形です。
+
+```text
+[seq:u64][sourceNodeId:u64][op:u8][recordFlags:u8][keyLen:u32][valueLen:u32][key][value]
+```
+
+`BLOB_PUT` payload は次の形です。
+
+```text
+[seq:u64][blobId:u64][contentLen:u64][content]
+```
+
+`ACK` payload は次の形です。
+
+```text
+[seq:u64][stage:u8][reserved:u8]
+```
+
+予約済みの read message は framing layer では encode/decode できますが、現在の replication client/server 経路では、利用可能な Cluster read protocol として公開されていません。
+
+## セキュアチャネル
+
+`TransportMode::SECURE` では、レプリケーション frame の前に native secure channel を開きます。identity seed は load-or-create され、ローカルの static public key を導出するために使われます。
+
+任意で `pinnedPeers` を設定すると、cluster node id ごとに期待する public key を pin できます。Replica 側では、`primaryNodeId` が未指定の場合に `secure.expectedPrimaryNodeId` を Primary id として使えます。
+
+`TransportMode::PLAIN` は、advertised host が loopback、link-local、unique-local IPv6、または private IPv4 の場合だけ許可されます。
+
+## Cluster Manifest
+
+`cluster.akmf` には、node join、node leave、primary lease の記録が durable breadcrumb として書かれます。現在の Manager はこれらの event を書きますが、メンバー構成の復元や Primary 選出のために replay するわけではありません。
+
+## 運用上の境界
+
+現時点では、次の制約を明示的に扱ってください。
+
+- 自動 Primary 選出はありません。
+- split-brain を安全に避ける自動フェイルオーバーはありません。
+- `STRIPE` のデータ移行は自動ではありません。
+- Replica はレプリケーションの受信側であり、独立した書き込み入口ではありません。
+- メモリ上の catch-up buffer は 4096 entry frame までです。
+- Blob replication は ACK wait の対象ではありません。
+- read routing と client traffic routing は外部の責任です。
+- メンバー変更には、外部の移行計画と rollout 計画が必要です。
+
+今の Cluster 層は、エンジンレベルのレプリケーション部品として見るのが自然です。本番向けに使う場合は、メンバー管理、フェイルオーバー、トラフィックルーティング、snapshot 転送、ヘルスチェック、移行を担当する制御層を別途用意する前提になります。

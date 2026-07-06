@@ -1,0 +1,152 @@
+---
+title: Cluster Architecture
+description: Runtime parts, routing, replication flow, wire format, and limitations of AkkEngine Cluster.
+---
+
+Use this page when you need to understand how the cluster runtime works internally. For configuration and startup examples, see [Cluster Usage](/akkaradb-native/api/low-level/cluster/usage/).
+
+## Runtime Parts
+
+The cluster runtime has three main parts:
+
+| Part | Responsibility |
+|---|---|
+| `ClusterConfig` | Durable membership, placement mode, node capabilities, data/API ports, replication ports, and acknowledgement policy. |
+| `ClusterManager` | Chooses the local runtime role from explicit startup options and records cluster breadcrumbs. |
+| `ClusterRuntime` | Installs a replication server on a primary node or a replication client on a replica node. |
+
+When the node starts as `PRIMARY`, it listens on the configured replication port and ships local write records and blob payloads to connected replicas. When the node starts as `REPLICA`, it connects to the configured primary, receives frames, and applies records through engine callbacks.
+
+The runtime does not elect a primary automatically. For `MIRROR` and `STRIPE`, `NodeStartupRole::AUTO` is rejected at startup.
+
+## Config Validation
+
+`ClusterConfig` validates itself during construction and load.
+
+| Rule | Failure case |
+|---|---|
+| Node ids must be unique and non-zero. | `nodeId == 0` or duplicate ids. |
+| Hosts must be non-empty. | Empty `NodeInfo::host`. |
+| Capabilities must be known flags. | Bits outside `COORDINATOR_ELIGIBLE | DATA_BEARING`. |
+| Cluster modes need data nodes. | `MIRROR` / `STRIPE` with no `DATA_BEARING` node. |
+| Cluster modes need coordinator candidates. | `MIRROR` / `STRIPE` with no `COORDINATOR_ELIGIBLE` node. |
+| Quorum must be explicit. | `AckPolicyMode::QUORUM` with `quorum == 0`. |
+
+`ClusterConfig` is a compact, CRC-protected binary file with magic `AKC5` and version `1`. `ClusterConfig::save()` writes atomically through a temporary file and validates before writing. `ClusterConfig::load()` checks magic, version, file length, and CRC before returning a validated config.
+
+## Routing
+
+`ClusterRouter` is a pure in-memory view over `ClusterConfig`. It does not perform network I/O and does not know whether a node is currently healthy.
+
+| Method | Behavior |
+|---|---|
+| `writeTargets(key)` | Returns the nodes that should receive a write for the key. |
+| `readCandidates(key)` | Returns nodes that can satisfy a read for the key. The current implementation mirrors write placement. |
+
+In `MIRROR`, routing returns all data-bearing nodes. In `STRIPE`, routing returns the deterministic rendezvous-hash owner. If a clustered mode has no data-bearing node, routing throws.
+
+The engine-level replication path currently ships primary writes to connected replicas. External request routers still need to decide which process should receive client traffic.
+
+## Replication Flow
+
+The primary ships two kinds of data:
+
+| Message | Meaning |
+|---|---|
+| `ENTRY` | A key/value mutation, either `PUT` or `REMOVE`. |
+| `BLOB_PUT` | External blob content associated with a blob reference. |
+
+`AkkEngine::put()` and `putHinted()` reserve a sequence, write locally, and then call `shipEntry()`. Large values that are externalized through the blob manager are sent with `shipBlob()` as well. `remove()` is represented as an `ENTRY` with `ReplOpType::REMOVE`.
+
+On the replica, `ENTRY` frames call the engine apply callback. The replica appends to WAL/version-log when those components are enabled, applies to the memtable, and advances the local sequence. `BLOB_PUT` writes the blob content when the blob manager is enabled.
+
+## Catch-Up Window
+
+During handshake, the replica sends:
+
+```text
+[nodeId:u64][lastSeq:u64][role:u8][reserved:u8]
+```
+
+The primary responds with:
+
+```text
+[nodeId:u64][currentSeq:u64][role:u8][reserved:u8]
+```
+
+The primary keeps the most recent `4096` entry frames in memory. When a replica connects, it receives buffered entries whose sequence is greater than its `lastSeq`.
+
+This is a short catch-up window, not durable log shipping. Blob frames are not retained in this buffer. If a replica falls behind beyond the in-memory window, use an external snapshot/copy procedure before reconnecting it.
+
+## ACK Behavior
+
+The replica only sends ACK frames for the configured stage. The primary waits up to about 5 seconds, checking every 50 ms. If the condition is not met before the deadline, the current implementation returns from the wait rather than throwing.
+
+Blob frames are sent to replicas but are not waited on by the entry acknowledgement policy.
+
+## Wire Format
+
+Replication uses TCP frames. All integer fields are little-endian. The outer frame is:
+
+```text
+[magic:u32 = "AKR5"][type:u8][flags:u8][payloadLen:u32][payloadCrc32c:u32][payload]
+```
+
+The CRC covers the payload only. Supported message types are:
+
+| Type | Value | Direction |
+|---|---:|---|
+| `CLIENT_HELLO` | `0x01` | Replica to primary |
+| `SERVER_HELLO` | `0x02` | Primary to replica |
+| `ENTRY` | `0x10` | Primary to replica |
+| `BLOB_PUT` | `0x11` | Primary to replica |
+| `ACK` | `0x12` | Replica to primary |
+| `READ_REQUEST` | `0x20` | Reserved |
+| `READ_RESPONSE` | `0x21` | Reserved |
+
+An `ENTRY` payload is:
+
+```text
+[seq:u64][sourceNodeId:u64][op:u8][recordFlags:u8][keyLen:u32][valueLen:u32][key][value]
+```
+
+A `BLOB_PUT` payload is:
+
+```text
+[seq:u64][blobId:u64][contentLen:u64][content]
+```
+
+An `ACK` payload is:
+
+```text
+[seq:u64][stage:u8][reserved:u8]
+```
+
+The reserved read messages are encoded by the framing layer, but the current replication client/server path does not expose a read protocol as a usable cluster feature.
+
+## Secure Channel
+
+`TransportMode::SECURE` opens the native secure channel before replication frames are exchanged. The identity seed is loaded or created and used to derive the local static public key.
+
+Optional `pinnedPeers` can pin an expected public key for a cluster node id. Replica-side `secure.expectedPrimaryNodeId` can also be used as the primary id when `primaryNodeId` is not set.
+
+`TransportMode::PLAIN` is allowed only for advertised loopback, link-local, unique-local IPv6, or private IPv4 hosts.
+
+## Cluster Manifest
+
+`cluster.akmf` records durable breadcrumbs for node join, node leave, and primary lease. The current manager writes these events, but does not replay them to rebuild membership or elect a primary.
+
+## Operational Boundaries
+
+Keep these constraints explicit:
+
+- There is no automatic primary election.
+- There is no split-brain-safe automatic failover.
+- There is no automatic data migration for `STRIPE`.
+- Replicas are replication consumers, not independent write-ingress nodes.
+- The in-memory catch-up buffer is limited to 4096 entry frames.
+- Blob replication is not part of the ACK wait.
+- Read routing and client traffic routing are external responsibilities.
+- Membership changes need an external migration and rollout plan.
+
+For now, treat the cluster layer as an engine-level replication primitive. A production deployment should add a control plane for membership, failover, traffic routing, snapshot transfer, health checks, and migration.

@@ -1,0 +1,143 @@
+---
+title: API サーバーの使い方
+description: AkkEngine API サーバーを有効化し、HTTP、TCP、gRPC から呼び出す方法。
+---
+
+このページは、API サーバーを起動して別プロセスから `AkkEngine` を呼びたい場合に読むページです。通信方式の内部構造、フレーミング、制限値、寿命管理は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/) に分けています。
+
+## サーバーを有効にする
+
+エンジンを開く前にコンポーネントを有効化します。`components.apiEnabled` を `true` にする場合、`api.bindHost` は必須です。
+
+```cpp
+#include "akk/engine/AkkEngine.hpp"
+
+#include <utility>
+
+namespace engine = akkaradb::engine;
+
+int main() {
+    engine::AkkEngineOptions opts;
+    opts.paths.dataDir = "data/api";
+
+    opts.components.apiEnabled = true;
+    opts.api.bindHost = "127.0.0.1";
+    opts.api.backends = {
+        engine::AkkEngineOptions::ApiBackend::HTTP,
+    };
+    opts.api.httpPort = 7070;
+    opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::PLAIN;
+
+    auto db = engine::AkkEngine::open(std::move(opts));
+
+    // エンジンが開いている間、HTTP リスナーも起動しています。
+    db->close();
+}
+```
+
+`api.backends` が空の場合、現在のビルドに含まれている通信方式がまとめて起動されます。多くのローカルビルドでは HTTP と TCP が対象です。gRPC は、本物の Protobuf/gRPC バックエンドが有効なビルドでだけ含まれます。
+
+公開環境や共有環境では、通信方式を明示し、TLS を使う構成を推奨します。`PLAIN` はローカル開発では便利ですが、安全なデプロイの既定値として扱うべきではありません。
+
+## 通信方式を選ぶ
+
+| 通信方式 | 向いている用途 |
+|---|---|
+| HTTP | 手元での確認、ローカルツール、スクリプト、簡単なサービス連携。 |
+| TCP | AK5 バイナリフレームを直接実装できる、高スループット向けクライアント。 |
+| gRPC | gRPC バックエンドを含むビルドで、生成クライアントやサービス定義を使いたい場合。 |
+
+どの通信方式でも、基本はバイト列指向のキー/値操作です。最初の連携では HTTP から始めるのが扱いやすいです。より低いオーバーヘッドや生成クライアントが必要になった段階で、TCP や gRPC を選びます。
+
+## HTTP の簡単な確認
+
+サーバーが `127.0.0.1:7070` で起動していれば、基本操作は `curl` で確認できます。
+
+```powershell
+curl -s -X POST "http://127.0.0.1:7070/v1/put?key=user:1" --data "Alice"
+curl -s "http://127.0.0.1:7070/v1/get?key=user:1"
+curl -s "http://127.0.0.1:7070/v1/ping"
+curl -s -X DELETE "http://127.0.0.1:7070/v1/remove?key=user:1"
+```
+
+キーはクエリ文字列で渡され、サーバー側で percent decode されます。`/v1/put` のリクエストボディは、そのまま生の値として保存されます。`/v1/get` は値のバイト列を返し、キーが存在しない場合は `404` を返します。
+
+## HTTP エンドポイント
+
+| Method | Path | Parameters | Result |
+|---|---|---|---|
+| `GET` | `/v1/ping` | なし | text `pong`。 |
+| `POST` | `/v1/put` | `key` | リクエストボディを値として保存します。 |
+| `POST` | `/v1/putHinted` | `key`, `fp64`, `miniKey` | 呼び出し側が計算した key fingerprint 付きで値を保存します。 |
+| `GET` | `/v1/get` | `key` | 生の値バイト列、または `404`。 |
+| `DELETE` | `/v1/remove` | `key` | 対象キーへ tombstone を書き込みます。 |
+| `DELETE` | `/v1/removeHinted` | `key`, `fp64`, `miniKey` | key fingerprint 付きで削除します。 |
+| `GET` | `/v1/exists` | `key` | 1 byte の `0` または `1` を返します。 |
+| `GET` | `/v1/count` | `start`, `end` | `[start, end)` の件数を little-endian `u64` で返します。 |
+| `GET` | `/v1/scan` | `start`, `end`, optional `limit`, optional `stream` | scan 結果を binary payload または chunked stream で返します。 |
+| `GET` | `/v1/getAt` | `key`, `seq` | 指定 sequence 時点の値バイト列、または `404`。 |
+| `GET` | `/v1/history` | `key`, optional `stream` | version history を binary payload または chunked stream で返します。 |
+| `POST` | `/v1/rollbackTo` | `seq` | エンジン全体を指定 sequence へ戻します。 |
+| `POST` | `/v1/rollbackKey` | `key`, `seq` | 1 つのキーを指定 sequence へ戻します。 |
+| `POST` | `/v1/batchPut` | binary body | 複数の key/value entry を保存します。 |
+| `POST` | `/v1/batchGet` | binary body | キーごとに結果を返します。 |
+| `POST` | `/v1/forceSync` | なし | durable state を強制同期します。 |
+| `POST` | `/v1/forceFlush` | なし | MemTable state を SST storage へ flush します。 |
+| `POST` | `/v1/runBlobGc` | なし | Blob garbage collection を実行します。 |
+| `GET` | `/v1/stats` | なし | compact binary stats snapshot を返します。 |
+
+`putHinted` と `removeHinted` は、呼び出し側がすでに key fingerprint を計算している場合の hot path です。通常のクライアントは `put` と `remove` から使うのが自然です。
+
+## 一括処理
+
+`batchPut` request body:
+
+```text
+[count:u32le]
+repeat count:
+  [key_len:u32le][value_len:u32le][key bytes][value bytes]
+```
+
+`batchGet` request body:
+
+```text
+[count:u32le]
+repeat count:
+  [key_len:u32le][key bytes]
+```
+
+`batchGet` response:
+
+```text
+[count:u32le]
+repeat count:
+  [status:u8][value_len:u32le][value bytes]
+```
+
+response の `status` は TCP の status enum と同じです。`0x00` は OK、`0x01` は NotFound、`0xFF` は Error です。一括処理の item count は `api.httpMaxBatchItems` で制限されます。
+
+## ストリーミング呼び出し
+
+`/v1/scan` と `/v1/history` は、`stream` が true と解釈される場合に chunked streaming へ切り替わります。空、`0`、`false`、`off`、`no` は false で、それ以外の空でない値は true です。
+
+呼び出し側が行を逐次処理でき、レスポンス全体を先にメモリへためる必要がない場合に向いています。wire format は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/#http-ストリーミング) に分けています。
+
+## TLS と公開範囲
+
+API サーバーの TLS は `api.transportMode` と `api.tls` で制御します。同じ通信モードが、有効化された API 通信方式へ適用されます。
+
+```cpp
+opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::TLS;
+opts.api.tls.certPath = "certs/server.crt";
+opts.api.tls.keyPath = "certs/server.key";
+opts.api.tls.caPath = "certs/ca.crt";
+opts.api.tls.verifyPeer = true;
+```
+
+ローカル開発では `127.0.0.1` に bind するのが扱いやすいです。`0.0.0.0` や外部 interface へ bind する場合は、TLS、リクエスト制限、運用上のアクセス制御を先に決めてから公開してください。
+
+## エラー処理
+
+期待される不存在は例外ではありません。HTTP の `GET` は missing key に対して `404` を返し、TCP と gRPC でも対応する not-found status を返します。
+
+不正なリクエスト、不正な payload、storage failure、close 済みエンジンへのアクセスはエラーです。HTTP では、不正なリクエストは `400`、未知の path や missing key は `404`、内部の engine 操作が例外を投げた場合は `500` になります。

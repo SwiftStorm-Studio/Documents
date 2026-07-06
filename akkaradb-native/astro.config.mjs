@@ -11,7 +11,7 @@ export default defineConfig({
 	integrations: [
 		markdoc(),
 		starlight({
-			title: 'AKkaraDB Native',
+			title: 'AkkaraDB Native',
 			customCss: ['./src/styles/oled.css'],
 			components: {
 				Header: './src/components/Header.astro',
@@ -38,9 +38,34 @@ export default defineConfig({
 									label: 'AkkEngine',
 									items: [
 										{ label: 'Core Usage', translations: { ja: '基本操作' }, slug: 'api/low-level' },
+										{
+											label: 'API Server',
+											translations: { ja: 'API サーバー' },
+											items: [
+												{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/api-server' },
+												{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/api-server/usage' },
+												{
+													label: 'Architecture',
+													translations: { ja: 'アーキテクチャ' },
+													slug: 'api/low-level/api-server/architecture',
+												},
+											],
+										},
+										{
+											label: 'Cluster',
+											translations: { ja: 'Cluster' },
+											items: [
+												{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/cluster' },
+												{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/cluster/usage' },
+												{
+													label: 'Architecture',
+													translations: { ja: 'アーキテクチャ' },
+													slug: 'api/low-level/cluster/architecture',
+												},
+											],
+										},
 										{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
 										{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
-										{ label: 'API Server', translations: { ja: 'API サーバー' }, slug: 'api/low-level/api-server' },
 									],
 								},
 							],

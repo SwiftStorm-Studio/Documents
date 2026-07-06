@@ -1,0 +1,198 @@
+---
+title: Cluster の使い方
+description: AkkEngine Cluster ノードを設定し、Primary または Replica として起動する方法。
+---
+
+このページは、Cluster のメンバー構成を定義し、ノードを起動したい場合に読むページです。実行時の内部構造、ルーティング、通信形式、運用上の境界は [Cluster のアーキテクチャ](/akkaradb-native/ja/api/low-level/cluster/architecture/) に分けています。
+
+## モードを選ぶ
+
+`ReplicationMode` は配置方法を決めます。この値は `ClusterConfig` に保存されます。
+
+| モード | 意味 |
+|---|---|
+| `STANDALONE` | ローカルだけで動作します。レプリケーションは不要です。 |
+| `MIRROR` | 書き込みをすべてのデータ保持ノードへ送ります。 |
+| `STRIPE` | キーごとに、決定的な rendezvous hashing で 1 つのデータ保持ノードを選びます。 |
+
+`STRIPE` は、ノード構成を変えても既存データを自動で移動しません。Striped な構成でメンバーを変える場合は、運用上の移行作業として扱います。
+
+## 起動ロールを選ぶ
+
+非 standalone モードでは、`NodeStartupRole` を明示します。
+
+| 起動ロール | 実行時ロール | メモ |
+|---|---|---|
+| `PRIMARY` | `PRIMARY` | ローカルノードが config 内に存在し、`COORDINATOR_ELIGIBLE` を持つ必要があります。 |
+| `REPLICA` | `REPLICA` | Primary の node id、host、replication port を解決できる必要があります。 |
+| `AUTO` | `MIRROR` / `STRIPE` では拒否 | Cluster モードでの自動ロール選択は未実装です。 |
+
+Primary / Replica は実行時ロールです。配置モードとは別の概念です。たとえば `MIRROR` でも、書き込みを送る Primary プロセスと、それを受け取る Replica プロセスがあります。
+
+## ノード ID を準備する
+
+各エンジンインスタンスは、安定した数値の node id を持ちます。`AkkEngine::open()` は `paths.nodeIdPath` から node id を読み込み、ファイルがなければランダムな非ゼロ `uint64_t` を生成して保存します。
+
+`paths.dataDir` を設定している場合、既定パスは次の通りです。
+
+```text
+<dataDir>/node.id
+```
+
+非 standalone モードでは、この id が `ClusterConfig` 内の `NodeInfo::nodeId` と一致している必要があります。実運用では、初回の Cluster 起動前に `node.id` を作成・配置するか、生成された id を読んで config に追加してから `components.clusterEnabled` を有効にします。
+
+## Cluster Config を定義する
+
+Cluster 設定は `cluster::ClusterConfig` で表します。node id、peer host、data/API port、replication port、node capability、配置モード、ACK ポリシーを保持します。
+
+```cpp
+#include "akk/engine/AkkEngine.hpp"
+#include "akk/engine/cluster/ClusterConfig.hpp"
+
+#include <utility>
+#include <vector>
+
+namespace engine = akkaradb::engine;
+namespace cluster = akkaradb::engine::cluster;
+
+cluster::ClusterConfig makeConfig() {
+    std::vector<cluster::NodeInfo> nodes{
+        {
+            .nodeId = 1,
+            .host = "127.0.0.1",
+            .dataPort = 7070,
+            .replPort = 7170,
+            .capabilities = cluster::COORDINATOR_ELIGIBLE | cluster::DATA_BEARING,
+        },
+        {
+            .nodeId = 2,
+            .host = "127.0.0.1",
+            .dataPort = 7071,
+            .replPort = 7171,
+            .capabilities = cluster::DATA_BEARING,
+        },
+    };
+
+    cluster::AckPolicy ack{};
+    ack.mode = cluster::AckPolicyMode::ALL_TARGETS;
+    ack.stage = cluster::AckStage::APPLIED;
+
+    return cluster::ClusterConfig{
+        std::move(nodes),
+        cluster::ReplicationMode::MIRROR,
+        ack,
+    };
+}
+```
+
+`NodeInfo::host` は他ノードから接続されるアドレスです。`replPort` はレプリケーション待ち受けポートです。`dataPort` はそのノードの公開データ/API ポートとして記録される値で、これだけで API サーバーが起動するわけではありません。
+
+## Primary として起動する
+
+`AkkEngine::open()` の前に Cluster コンポーネントを有効にします。`opts.cluster.config` が指定されていればそれを使い、指定されていなければ `paths.clusterConfigPath` を読み込みます。
+
+```cpp
+engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/node-1";
+opts.paths.nodeIdPath = "data/node-1/node.id";
+opts.components.clusterEnabled = true;
+
+opts.cluster.config = makeConfig();
+opts.cluster.runtime.startupRole = cluster::NodeStartupRole::PRIMARY;
+opts.cluster.runtime.transportMode = cluster::TransportMode::PLAIN;
+opts.cluster.runtime.replBindHost = "127.0.0.1";
+
+auto db = engine::AkkEngine::open(std::move(opts));
+```
+
+Primary 起動は、ローカル node id が config 内に存在しない場合、またはローカルノードが `COORDINATOR_ELIGIBLE` を持たない場合に失敗します。レプリケーション待ち受けには、ローカルノードに設定された `replPort` が使われます。
+
+## Replica として起動する
+
+Replica 起動には Primary の id が必要です。`primaryNodeId` が `ClusterConfig` 内に存在する場合、runtime はその config entry から `primaryHost` と `primaryReplPort` を補完できます。
+
+```cpp
+engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/node-2";
+opts.paths.nodeIdPath = "data/node-2/node.id";
+opts.components.clusterEnabled = true;
+
+opts.cluster.config = makeConfig();
+opts.cluster.runtime.startupRole = cluster::NodeStartupRole::REPLICA;
+opts.cluster.runtime.primaryNodeId = 1;
+opts.cluster.runtime.transportMode = cluster::TransportMode::PLAIN;
+
+auto db = engine::AkkEngine::open(std::move(opts));
+```
+
+Primary の接続先は直接上書きできます。
+
+```cpp
+opts.cluster.runtime.primaryNodeId = 1;
+opts.cluster.runtime.primaryHost = "10.0.0.10";
+opts.cluster.runtime.primaryReplPort = 7170;
+```
+
+Primary id が未指定、ローカルノード自身を指している、coordinator 候補ではない、または host と replication port を解決できない場合、Replica 起動は失敗します。
+
+Replica クライアントはバックグラウンドで再接続します。接続やハンドシェイクに失敗した場合、エンジンが開いている間は約 200 ms 待ってから再試行します。
+
+## ACK ポリシーを設定する
+
+`AckPolicy` は、Primary の書き込みが Replica の確認をどこまで待つかを制御します。
+
+| ポリシー | 意味 |
+|---|---|
+| `NONE` | Replica からの ACK を待ちません。 |
+| `ALL_TARGETS` | 現在 live なすべての Replica が対象 sequence を ACK するまで待ちます。 |
+| `QUORUM` | 少なくとも `quorum` 個の live Replica が対象 sequence を ACK するまで待ちます。 |
+
+`AckStage` は、ACK が何を意味するかを決めます。
+
+| Stage | Replica 側の動作 |
+|---|---|
+| `RECEIVED` | entry bytes を受信し decode した後に ACK します。 |
+| `APPLIED` | ローカルエンジンへ適用した後に ACK します。 |
+| `DURABLE` | ローカルの durability sync を強制してから ACK します。 |
+
+強い stage ほど確認内容は強くなりますが、write latency は増えます。Blob frame は Replica へ送られますが、entry ACK ポリシーの待機対象にはなりません。
+
+## セキュア通信を設定する
+
+`TransportMode::SECURE` では、レプリケーション frame の前に native secure channel を開きます。`secure.identitySeedPath` が空で、`paths.dataDir` が設定されている場合、runtime は次の path を使います。
+
+```text
+<dataDir>/cluster.identity
+```
+
+```cpp
+opts.cluster.runtime.transportMode = cluster::TransportMode::SECURE;
+opts.cluster.runtime.secure.identitySeedPath = "data/node-1/cluster.identity";
+opts.cluster.runtime.secure.expectedPrimaryNodeId = 1;
+```
+
+`TransportMode::PLAIN` は、すべての advertised node host が loopback、link-local、unique-local IPv6、または private IPv4 の場合だけ許可されます。public/WAN host は拒否されるため、`SECURE` を使ってください。
+
+## 永続ファイル
+
+`paths.dataDir` が設定されている場合、Cluster 関連の既定パスは次の通りです。
+
+| Path | 既定値 |
+|---|---|
+| `paths.clusterConfigPath` | `<dataDir>/cluster.akcc` |
+| `paths.nodeIdPath` | `<dataDir>/node.id` |
+| Cluster manifest | `<dataDir>/cluster.akmf` |
+| Secure identity seed | secure mode が既定 path を必要とする場合、`<dataDir>/cluster.identity` |
+
+`cluster.akcc` はメンバー構成とポリシーを保存します。`replBindHost`、Primary の上書き、secure pin、transport mode のような実行時専用値は、Cluster config には保存されません。
+
+## 起動失敗時の確認
+
+| 症状 | 確認すること |
+|---|---|
+| `selfNodeId not found` | バイナリの `node.id` の値が `NodeInfo::nodeId` のどれとも一致していない。 |
+| Primary 起動が拒否される | ローカルノードに `COORDINATOR_ELIGIBLE` が付いていない。 |
+| Replica 起動が拒否される | `primaryNodeId` がない、ローカル node id と同じ、または coordinator 候補ではない。 |
+| config load が失敗する | `cluster.akcc` がない、壊れている、version が違う、CRC が合わない。 |
+| plain transport が拒否される | `NodeInfo::host` に public/WAN address が含まれている。 |
+| Cluster backend が見つからない | cluster runtime backend がリンクされていない、または `runtimeBackendPath` から load できない。 |

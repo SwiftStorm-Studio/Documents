@@ -1,180 +1,27 @@
 ---
 title: API Server
-description: How to expose AkkEngine through the built-in HTTP, TCP, and gRPC API server transports.
+description: Entry point for the AkkEngine HTTP, TCP, and gRPC API server docs.
 ---
 
-The API server layer lets an `AkkEngine` instance accept requests over a process or network boundary. It is still part of the low-level engine surface: callers send byte keys and byte values, and the server forwards those operations to the same engine APIs used in embedded code.
+The API server layer lets an `AkkEngine` instance accept requests across a process or network boundary. It is still part of the low-level engine surface: callers send byte keys and byte values, and the server forwards those operations to the same engine APIs used by embedded code.
 
-Use it when another process, language runtime, test tool, or service boundary needs to reach the engine without linking directly to the C++ API. If your application already runs in the same C++ process, direct `AkkEngine` calls are simpler and avoid network framing overhead.
+Use it when another process, language runtime, test tool, or service boundary needs to reach the engine without linking directly to the C++ API. If your application already runs in the same C++ process, direct `AkkEngine` calls are simpler and avoid protocol overhead.
 
-## Enable The Server
+The server code lives under `akkara/akkserver/` and is licensed separately under AGPLv3. Check that boundary before packaging or redistributing server-enabled builds.
 
-Enable the component before opening the engine. `api.bindHost` is required when `components.apiEnabled` is `true`.
+## Read By Goal
 
-```cpp
-#include "akk/engine/AkkEngine.hpp"
+| Goal | Page |
+|---|---|
+| Start the server and call it from clients | [API Server Usage](/akkaradb-native/api/low-level/api-server/usage/) |
+| Understand transports, framing, limits, and runtime shape | [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/) |
 
-#include <utility>
-
-namespace engine = akkaradb::engine;
-
-int main() {
-    engine::AkkEngineOptions opts;
-    opts.paths.dataDir = "data/api";
-
-    opts.components.apiEnabled = true;
-    opts.api.bindHost = "127.0.0.1";
-    opts.api.backends = {
-        engine::AkkEngineOptions::ApiBackend::HTTP,
-    };
-    opts.api.httpPort = 7070;
-    opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::PLAIN;
-
-    auto db = engine::AkkEngine::open(std::move(opts));
-
-    // The HTTP listener is running while the engine is open.
-    db->close();
-}
-```
-
-When `api.backends` is empty, the aggregate server starts every transport backend compiled into the current build. In most local builds this means HTTP and TCP. gRPC is included only when the build has the real Protobuf/gRPC backend enabled.
-
-For public or shared environments, prefer explicit backends and TLS. `PLAIN` is convenient for local development, but it should not be treated as a secure deployment default.
-
-## Transport Choice
+## Transport Summary
 
 | Transport | Best fit |
 |---|---|
-| HTTP | Manual testing, simple local tools, scripting, and coarse service integration. |
-| TCP | High-throughput clients that can implement the AK5 binary framing directly. |
+| HTTP | Manual testing, local tools, scripting, and simple service integration. |
+| TCP | High-throughput clients that can implement AK5 binary framing directly. |
 | gRPC | Typed service clients when the build includes the gRPC backend. |
 
-All transports expose byte-oriented key/value operations. The HTTP API is not a JSON REST API; successful reads return raw bytes, and many mutation endpoints return `204 No Content`.
-
-## HTTP Quick Check
-
-With the server running on `127.0.0.1:7070`, basic operations can be tested with `curl`.
-
-```powershell
-curl -s -X POST "http://127.0.0.1:7070/v1/put?key=user:1" --data "Alice"
-curl -s "http://127.0.0.1:7070/v1/get?key=user:1"
-curl -s "http://127.0.0.1:7070/v1/ping"
-curl -s -X DELETE "http://127.0.0.1:7070/v1/remove?key=user:1"
-```
-
-The key is passed through the query string and percent-decoded by the server. The request body for `/v1/put` is stored as the raw value. `/v1/get` returns the raw value bytes or `404` when the key is missing.
-
-## HTTP Endpoints
-
-| Method | Path | Parameters | Result |
-|---|---|---|---|
-| `GET` | `/v1/ping` | none | Text `pong`. |
-| `POST` | `/v1/put` | `key` | Stores the request body as the value. |
-| `POST` | `/v1/putHinted` | `key`, `fp64`, `miniKey` | Stores a value with caller-provided key fingerprints. |
-| `GET` | `/v1/get` | `key` | Returns raw value bytes or `404`. |
-| `DELETE` | `/v1/remove` | `key` | Writes a tombstone for the key. |
-| `DELETE` | `/v1/removeHinted` | `key`, `fp64`, `miniKey` | Removes a key with caller-provided key fingerprints. |
-| `GET` | `/v1/exists` | `key` | Returns one byte: `0` or `1`. |
-| `GET` | `/v1/count` | `start`, `end` | Returns a little-endian `u64` count for `[start, end)`. |
-| `GET` | `/v1/scan` | `start`, `end`, optional `limit`, optional `stream` | Returns scan rows as a binary payload or chunked stream. |
-| `GET` | `/v1/getAt` | `key`, `seq` | Returns historical value bytes or `404`. |
-| `GET` | `/v1/history` | `key`, optional `stream` | Returns version history as a binary payload or chunked stream. |
-| `POST` | `/v1/rollbackTo` | `seq` | Rolls the whole engine back to a sequence. |
-| `POST` | `/v1/rollbackKey` | `key`, `seq` | Rolls one key back to a sequence. |
-| `POST` | `/v1/batchPut` | binary body | Stores multiple key/value entries. |
-| `POST` | `/v1/batchGet` | binary body | Returns one result per key. |
-| `POST` | `/v1/forceSync` | none | Forces durable state synchronization. |
-| `POST` | `/v1/forceFlush` | none | Flushes MemTable state toward SST storage. |
-| `POST` | `/v1/runBlobGc` | none | Runs Blob garbage collection. |
-| `GET` | `/v1/stats` | none | Returns a compact binary stats snapshot. |
-
-`/v1/scan` and `/v1/history` switch to chunked streaming when `stream` is truthy, such as `stream=1` or `stream=true`.
-
-## Binary Payloads
-
-HTTP batch and scan-style endpoints use little-endian binary payloads.
-
-| Payload | Shape |
-|---|---|
-| `batchPut` request | `[count:u32le]` followed by `count` entries of `[key_len:u32le][value_len:u32le][key bytes][value bytes]`. |
-| `batchGet` request | `[count:u32le]` followed by `count` entries of `[key_len:u32le][key bytes]`. |
-| `batchGet` response | `[count:u32le]` followed by `count` entries of `[status:u8][value_len:u32le][value bytes]`. |
-| `scan` response | `[count:u32le][truncated:u8]` followed by rows of `[key_len:u16le][value_len:u32le][key bytes][value bytes]`. |
-| `history` response | `[count:u32le][truncated:u8]` followed by entries of `[seq:u64le][source_node_id:u64le][timestamp_ns:u64le][flags:u32le][value_len:u32le][value bytes]`. |
-
-For applications that need a stable client library, prefer wrapping these payloads in a small language-specific client instead of scattering binary parsing across application code.
-
-## TCP Protocol
-
-The TCP transport uses AK5 binary frames. Request frames start with a 16-byte header:
-
-```text
-char[4] magic = "AK5Q"
-u8      version = 2
-u8      opcode
-u32     request_id
-u16     key_len
-u32     val_len
-```
-
-Response frames start with a 13-byte header:
-
-```text
-char[4] magic = "AK5S"
-u8      status
-u32     request_id
-u32     val_len
-```
-
-Each TCP request is `[request header][key bytes][value bytes][crc32c:u32le]`, where the CRC covers `key bytes + value bytes`. Each TCP response is `[response header][value bytes][crc32c:u32le]`, where the CRC covers the value bytes.
-
-| Opcode | Operation |
-|---:|---|
-| `0x01` | `GET` |
-| `0x02` | `PUT` |
-| `0x03` | `REMOVE` |
-| `0x04` | `GET_AT` |
-| `0x05` | `BATCH_PUT` |
-| `0x06` | `BATCH_GET` |
-| `0x07` | `PING` |
-| `0x08` | `EXISTS` |
-| `0x09` | `COUNT` |
-| `0x0A` | `SCAN` |
-| `0x0B` | `HISTORY` |
-| `0x0C` | `ROLLBACK_TO` |
-| `0x0D` | `ROLLBACK_KEY` |
-| `0x0E` | `FORCE_SYNC` |
-| `0x0F` | `FORCE_FLUSH` |
-| `0x10` | `STATS` |
-| `0x11` | `SCAN_STREAM` |
-| `0x12` | `HISTORY_STREAM` |
-
-TCP is the right target when you want lower overhead and can control both sides of the client implementation.
-
-## gRPC
-
-The gRPC transport exposes unary calls for the same engine operations, plus server-streaming calls for scans and history. It is build-dependent: when Protobuf/gRPC support is not present, the gRPC backend is not available as a real server transport.
-
-Use gRPC when generated client code and service contracts are more important than the lowest possible framing overhead.
-
-## TLS And Exposure
-
-API server TLS is controlled by `api.transportMode` and `api.tls`. The same transport mode applies to the enabled API transports.
-
-```cpp
-opts.api.transportMode = engine::AkkEngineOptions::ApiTransportMode::TLS;
-opts.api.tls.certPath = "certs/server.crt";
-opts.api.tls.keyPath = "certs/server.key";
-opts.api.tls.caPath = "certs/ca.crt";
-opts.api.tls.verifyPeer = true;
-```
-
-Bind to `127.0.0.1` for local development. Bind to an external interface only after choosing TLS, request limits, and an operational access model deliberately.
-
-## Shutdown And Errors
-
-The server lifetime follows the engine lifetime. It starts during `AkkEngine::open()` and shuts down when `close()` runs or the engine is destroyed.
-
-HTTP returns `400` for malformed requests, `404` for missing keys or unknown routes, and `500` when the underlying engine operation throws. TCP and gRPC report the same distinction through their own status framing.
-
-The API server code lives under `akkara/akkserver/` and is licensed separately under AGPLv3. Keep that boundary in mind when deciding how to package or redistribute server-enabled builds.
+All transports expose byte-oriented key/value operations. The HTTP API is not a JSON REST API: reads return raw bytes, counters are little-endian binary values, and many mutation endpoints return `204 No Content`.

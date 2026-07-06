@@ -1,0 +1,198 @@
+---
+title: Cluster Usage
+description: How to configure AkkEngine cluster nodes and start primary or replica processes.
+---
+
+Use this page when you want to configure cluster membership and start nodes. For runtime internals, routing, wire format, and operational boundaries, see [Cluster Architecture](/akkaradb-native/api/low-level/cluster/architecture/).
+
+## Choose A Mode
+
+`ReplicationMode` controls placement and is stored in `ClusterConfig`.
+
+| Mode | Meaning |
+|---|---|
+| `STANDALONE` | Local-only operation. Replication is not required. |
+| `MIRROR` | Writes are routed to every data-bearing node. |
+| `STRIPE` | Each key is routed to one data-bearing node using deterministic rendezvous hashing. |
+
+`STRIPE` does not move existing data when the node set changes. Treat membership changes in striped deployments as an operational migration.
+
+## Choose Startup Roles
+
+`NodeStartupRole` is explicit for non-standalone modes.
+
+| Startup role | Runtime role | Notes |
+|---|---|---|
+| `PRIMARY` | `PRIMARY` | The local node must exist in config and have `COORDINATOR_ELIGIBLE`. |
+| `REPLICA` | `REPLICA` | The runtime must resolve a primary node id, host, and replication port. |
+| `AUTO` | rejected for `MIRROR` / `STRIPE` | Automatic role selection is not implemented for clustered modes. |
+
+Primary and replica are runtime roles. They are separate from placement mode: a mirrored cluster still has a primary process shipping writes and one or more replica processes consuming them.
+
+## Prepare Node Identity
+
+Every engine instance has a stable numeric node id. `AkkEngine::open()` loads it from `paths.nodeIdPath`; if the file is missing, it creates a random non-zero `uint64_t` and writes it to disk.
+
+When `paths.dataDir` is set, the default path is:
+
+```text
+<dataDir>/node.id
+```
+
+For non-standalone modes, that id must match one `NodeInfo::nodeId` in `ClusterConfig`. In practice, create or copy `node.id` before first clustered startup, or read the generated id and add it to the config before enabling `components.clusterEnabled`.
+
+## Define Cluster Config
+
+Cluster configuration is represented by `cluster::ClusterConfig`. It stores node ids, peer hosts, data/API ports, replication ports, node capabilities, placement mode, and acknowledgement policy.
+
+```cpp
+#include "akk/engine/AkkEngine.hpp"
+#include "akk/engine/cluster/ClusterConfig.hpp"
+
+#include <utility>
+#include <vector>
+
+namespace engine = akkaradb::engine;
+namespace cluster = akkaradb::engine::cluster;
+
+cluster::ClusterConfig makeConfig() {
+    std::vector<cluster::NodeInfo> nodes{
+        {
+            .nodeId = 1,
+            .host = "127.0.0.1",
+            .dataPort = 7070,
+            .replPort = 7170,
+            .capabilities = cluster::COORDINATOR_ELIGIBLE | cluster::DATA_BEARING,
+        },
+        {
+            .nodeId = 2,
+            .host = "127.0.0.1",
+            .dataPort = 7071,
+            .replPort = 7171,
+            .capabilities = cluster::DATA_BEARING,
+        },
+    };
+
+    cluster::AckPolicy ack{};
+    ack.mode = cluster::AckPolicyMode::ALL_TARGETS;
+    ack.stage = cluster::AckStage::APPLIED;
+
+    return cluster::ClusterConfig{
+        std::move(nodes),
+        cluster::ReplicationMode::MIRROR,
+        ack,
+    };
+}
+```
+
+`NodeInfo::host` is the address peer nodes use. `replPort` is the replication listener port. `dataPort` is recorded as the public data/API port for that node; it does not start the API server by itself.
+
+## Start A Primary
+
+Enable the cluster component before `AkkEngine::open()`. The engine uses `opts.cluster.config` when provided; otherwise it loads `paths.clusterConfigPath`.
+
+```cpp
+engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/node-1";
+opts.paths.nodeIdPath = "data/node-1/node.id";
+opts.components.clusterEnabled = true;
+
+opts.cluster.config = makeConfig();
+opts.cluster.runtime.startupRole = cluster::NodeStartupRole::PRIMARY;
+opts.cluster.runtime.transportMode = cluster::TransportMode::PLAIN;
+opts.cluster.runtime.replBindHost = "127.0.0.1";
+
+auto db = engine::AkkEngine::open(std::move(opts));
+```
+
+Primary startup fails if the local node id is missing from config or the local node is not `COORDINATOR_ELIGIBLE`. The replication listener uses the local node's configured `replPort`.
+
+## Start A Replica
+
+Replica startup needs a primary id. If `primaryNodeId` exists in `ClusterConfig`, the runtime can fill `primaryHost` and `primaryReplPort` from that config entry.
+
+```cpp
+engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/node-2";
+opts.paths.nodeIdPath = "data/node-2/node.id";
+opts.components.clusterEnabled = true;
+
+opts.cluster.config = makeConfig();
+opts.cluster.runtime.startupRole = cluster::NodeStartupRole::REPLICA;
+opts.cluster.runtime.primaryNodeId = 1;
+opts.cluster.runtime.transportMode = cluster::TransportMode::PLAIN;
+
+auto db = engine::AkkEngine::open(std::move(opts));
+```
+
+You can override primary resolution directly:
+
+```cpp
+opts.cluster.runtime.primaryNodeId = 1;
+opts.cluster.runtime.primaryHost = "10.0.0.10";
+opts.cluster.runtime.primaryReplPort = 7170;
+```
+
+Replica startup fails when the primary id is missing, points at the local node, is not coordinator-eligible, or cannot resolve to a host and replication port.
+
+The replica client reconnects in the background. If a connection attempt or handshake fails, it waits about 200 ms and tries again while the engine remains open.
+
+## Configure ACK Policy
+
+`AckPolicy` controls how long primary writes wait for replica confirmation.
+
+| Policy | Meaning |
+|---|---|
+| `NONE` | Do not wait for replica acknowledgements. |
+| `ALL_TARGETS` | Wait until every currently live replica has acknowledged the sequence. |
+| `QUORUM` | Wait until at least `quorum` live replicas have acknowledged the sequence. |
+
+`AckStage` controls what the acknowledgement means.
+
+| Stage | Replica behavior |
+|---|---|
+| `RECEIVED` | ACK after receiving and decoding the entry bytes. |
+| `APPLIED` | ACK after applying the entry to the local engine. |
+| `DURABLE` | Force local durability sync, then ACK. |
+
+Higher stages give stronger confirmation and higher write latency. Blob frames are sent to replicas but are not waited on by the entry acknowledgement policy.
+
+## Configure Secure Transport
+
+`TransportMode::SECURE` uses the native secure channel before replication frames are exchanged. If `secure.identitySeedPath` is empty and `paths.dataDir` is set, the runtime uses:
+
+```text
+<dataDir>/cluster.identity
+```
+
+```cpp
+opts.cluster.runtime.transportMode = cluster::TransportMode::SECURE;
+opts.cluster.runtime.secure.identitySeedPath = "data/node-1/cluster.identity";
+opts.cluster.runtime.secure.expectedPrimaryNodeId = 1;
+```
+
+`TransportMode::PLAIN` is allowed only when every advertised node host is loopback, link-local, unique-local IPv6, or private IPv4. Public/WAN hosts are rejected and should use `SECURE`.
+
+## Durable Files
+
+When `paths.dataDir` is set, cluster-related paths default to:
+
+| Path | Default |
+|---|---|
+| `paths.clusterConfigPath` | `<dataDir>/cluster.akcc` |
+| `paths.nodeIdPath` | `<dataDir>/node.id` |
+| Cluster manifest | `<dataDir>/cluster.akmf` |
+| Secure identity seed | `<dataDir>/cluster.identity` when secure mode needs a default |
+
+`cluster.akcc` stores membership and policy. Runtime-only values such as `replBindHost`, primary overrides, secure pins, and transport mode are not serialized into the cluster config.
+
+## Startup Failure Checklist
+
+| Symptom | Check |
+|---|---|
+| `selfNodeId not found` | The binary `node.id` value does not match any `NodeInfo::nodeId`. |
+| Primary startup is rejected | The local node does not have `COORDINATOR_ELIGIBLE`. |
+| Replica startup is rejected | `primaryNodeId` is missing, equals local node id, or resolves to a non-coordinator node. |
+| Config load fails | `cluster.akcc` is missing, truncated, wrong version, or has a CRC mismatch. |
+| Plain transport is rejected | One or more `NodeInfo::host` values are public/WAN addresses. |
+| Cluster backend is unavailable | The cluster runtime backend was not linked or could not be loaded from `runtimeBackendPath`. |

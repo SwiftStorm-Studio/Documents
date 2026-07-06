@@ -147,6 +147,8 @@ Enable `components.versionLogEnabled` before relying on `history()`, `getAt()`, 
 
 Cluster support is intentionally separate from the local embedded path. Keep `components.clusterEnabled` disabled until node identity, membership, transport mode, and acknowledgement policy are explicit.
 
+For runtime role, replication mode, and startup examples, see [Cluster Usage](/akkaradb-native/api/low-level/cluster/usage/). For routing, replication flow, and wire format, see [Cluster Architecture](/akkaradb-native/api/low-level/cluster/architecture/).
+
 ## API Server Options
 
 `components.apiEnabled` starts one or more server transports from `api.backends`. Keep this disabled when the process calls `AkkEngine` directly and does not expose a network boundary.
@@ -211,7 +213,7 @@ TLS settings:
 
 The API server is useful when `AkkEngine` is acting as a local process boundary or embedded service. Library users that call `AkkEngine` directly can leave it disabled.
 
-For startup examples, HTTP endpoints, and TCP framing, see [Low-Level API Server](/akkaradb-native/api/low-level/api-server/).
+For startup examples and HTTP endpoints, see [API Server Usage](/akkaradb-native/api/low-level/api-server/usage/). For TCP framing and transport internals, see [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/).
 
 ## Suggested Presets
 
