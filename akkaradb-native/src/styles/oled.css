@@ -9,9 +9,9 @@
 		--sl-color-gray-3: hsl(214, 14%, 63%);
 		--sl-color-gray-4: hsl(214, 12%, 43%);
 		--sl-color-gray-5: hsl(214, 22%, 20%);
-		--sl-color-gray-6: hsl(216, 42%, 5%);
-		--sl-color-gray-7: hsl(216, 54%, 3%);
-		--sl-color-black: hsl(0, 0%, 0%);
+		--sl-color-gray-6: #000;
+		--sl-color-gray-7: #000;
+		--sl-color-black: #000;
 
 		--sl-color-orange-low: hsl(var(--sl-hue-orange), 42%, 16%);
 		--sl-color-orange: hsl(var(--sl-hue-orange), 88%, 65%);
@@ -37,9 +37,9 @@
 		--sl-color-text-accent: var(--sl-color-accent-high);
 		--sl-color-text-invert: var(--sl-color-white);
 		--sl-color-bg: var(--sl-color-black);
-		--sl-color-bg-nav: hsl(216, 64%, 4%);
-		--sl-color-bg-sidebar: hsl(216, 64%, 4%);
-		--sl-color-bg-inline-code: hsl(216, 40%, 10%);
+		--sl-color-bg-nav: #000;
+		--sl-color-bg-sidebar: #000;
+		--sl-color-bg-inline-code: #000;
 		--sl-color-bg-accent: hsl(210, 86%, 20%);
 		--sl-color-hairline-light: hsl(214, 34%, 18%);
 		--sl-color-hairline: hsl(214, 34%, 14%);
@@ -55,6 +55,18 @@
 @layer starlight.components {
 	:root[data-theme='oled'] {
 		scrollbar-color: hsl(214, 22%, 30%) var(--sl-color-black);
+	}
+
+	:root[data-theme='oled'] body,
+	:root[data-theme='oled'] .page,
+	:root[data-theme='oled'] .main-frame,
+	:root[data-theme='oled'] .main-pane,
+	:root[data-theme='oled'] .content-panel,
+	:root[data-theme='oled'] header.header,
+	:root[data-theme='oled'] .sidebar-pane,
+	:root[data-theme='oled'] .right-sidebar,
+	:root[data-theme='oled'] .right-sidebar-panel {
+		background-color: #000;
 	}
 
 	:root[data-theme='oled'] ::selection {
@@ -103,7 +115,7 @@
 	}
 
 	:root[data-theme='oled'] .expressive-code {
-		--ec-codeBg: hsl(216, 64%, 4%);
+		--ec-codeBg: #000;
 		--ec-codeFg: var(--sl-color-gray-1);
 		--ec-codeSelBg: hsl(209, 92%, 22%);
 		--ec-gtrFg: hsl(214, 16%, 55%);
@@ -117,18 +129,18 @@
 		--ec-brdCol: var(--sl-color-hairline-light);
 		--ec-tm-markBg: hsla(207, 100%, 66%, 0.12);
 		--ec-tm-markBrdCol: hsla(207, 100%, 66%, 0.45);
-		--ec-frm-edActTabBg: hsl(216, 48%, 7%);
+		--ec-frm-edActTabBg: #000;
 		--ec-frm-edActTabFg: var(--sl-color-gray-1);
 		--ec-frm-edActTabIndTopCol: var(--sl-color-accent-high);
 		--ec-frm-edTabBarBg: var(--sl-color-black);
 		--ec-frm-edTabBarBrdCol: var(--sl-color-hairline-light);
 		--ec-frm-edTabBarBrdBtmCol: var(--sl-color-hairline-light);
-		--ec-frm-edBg: hsl(216, 64%, 4%);
+		--ec-frm-edBg: #000;
 		--ec-frm-trmTtbDotsFg: var(--sl-color-gray-3);
 		--ec-frm-trmTtbBg: var(--sl-color-black);
 		--ec-frm-trmTtbFg: var(--sl-color-gray-1);
 		--ec-frm-trmTtbBrdBtmCol: var(--sl-color-hairline-light);
-		--ec-frm-trmBg: hsl(216, 64%, 4%);
+		--ec-frm-trmBg: #000;
 		--ec-frm-inlBtnFg: var(--sl-color-gray-1);
 		--ec-frm-inlBtnBg: var(--sl-color-gray-1);
 		--ec-frm-inlBtnBrd: var(--sl-color-gray-1);

@@ -19,6 +19,22 @@ When the node starts as `PRIMARY`, it listens on the configured replication port
 
 The runtime does not elect a primary automatically. For `MIRROR` and `STRIPE`, `NodeStartupRole::AUTO` is rejected at startup.
 
+## Control Plane Boundary
+
+Cluster is intentionally below a full distributed database control plane. The engine runtime can replicate entries, apply them on replicas, validate membership config, and expose deterministic placement. It does not currently own the operational decisions around the cluster.
+
+| Responsibility | Current owner |
+|---|---|
+| Membership source of truth | External config or deployment tooling |
+| Primary election | External orchestration |
+| Split-brain prevention | External orchestration |
+| Client traffic routing | API server, proxy, or application layer |
+| Snapshot transfer | External backup/copy process |
+| Striped data migration | External migration process |
+| Health-based failover | External monitoring and orchestration |
+
+This boundary matters because the runtime accepts explicit roles. If two processes are deliberately started as Primary for the same write stream, Cluster does not fence one of them.
+
 ## Config Validation
 
 `ClusterConfig` validates itself during construction and load.
@@ -27,12 +43,14 @@ The runtime does not elect a primary automatically. For `MIRROR` and `STRIPE`, `
 |---|---|
 | Node ids must be unique and non-zero. | `nodeId == 0` or duplicate ids. |
 | Hosts must be non-empty. | Empty `NodeInfo::host`. |
-| Capabilities must be known flags. | Bits outside `COORDINATOR_ELIGIBLE | DATA_BEARING`. |
+| Capabilities must be known flags. | Bits outside `COORDINATOR_ELIGIBLE` and `DATA_BEARING`. |
 | Cluster modes need data nodes. | `MIRROR` / `STRIPE` with no `DATA_BEARING` node. |
 | Cluster modes need coordinator candidates. | `MIRROR` / `STRIPE` with no `COORDINATOR_ELIGIBLE` node. |
 | Quorum must be explicit. | `AckPolicyMode::QUORUM` with `quorum == 0`. |
 
 `ClusterConfig` is a compact, CRC-protected binary file with magic `AKC5` and version `1`. `ClusterConfig::save()` writes atomically through a temporary file and validates before writing. `ClusterConfig::load()` checks magic, version, file length, and CRC before returning a validated config.
+
+Runtime-only settings are not serialized into `cluster.akcc`. Transport mode, secure peer pins, bind host overrides, and Primary endpoint overrides live in `EngineOptions`, so deployments can keep durable membership separate from per-process startup policy.
 
 ## Routing
 
@@ -47,6 +65,17 @@ In `MIRROR`, routing returns all data-bearing nodes. In `STRIPE`, routing return
 
 The engine-level replication path currently ships primary writes to connected replicas. External request routers still need to decide which process should receive client traffic.
 
+### Placement Versus Replication
+
+| Layer | What it decides |
+|---|---|
+| `ClusterRouter` | Which node ids own a key according to `ClusterConfig`. |
+| Primary runtime | Which connected replicas receive the local write stream. |
+| Replica runtime | How incoming frames are applied to the local engine. |
+| Client router | Which process receives application requests. This is external. |
+
+In other words, placement describes where data should live, while replication is the current mechanism used to copy writes from the Primary runtime to Replica runtimes.
+
 ## Replication Flow
 
 The primary ships two kinds of data:
@@ -59,6 +88,12 @@ The primary ships two kinds of data:
 `AkkEngine::put()` and `putHinted()` reserve a sequence, write locally, and then call `shipEntry()`. Large values that are externalized through the blob manager are sent with `shipBlob()` as well. `remove()` is represented as an `ENTRY` with `ReplOpType::REMOVE`.
 
 On the replica, `ENTRY` frames call the engine apply callback. The replica appends to WAL/version-log when those components are enabled, applies to the memtable, and advances the local sequence. `BLOB_PUT` writes the blob content when the blob manager is enabled.
+
+### Ordering
+
+Entry frames carry the Primary sequence number. The Replica applies entries through the engine callback in the order they are read from the replication stream. The local sequence advances as entries are applied.
+
+Blob payloads are shipped separately from entry frames. A blob-backed value can therefore require both the entry and its `BLOB_PUT` payload to be present before the value is fully useful on the Replica.
 
 ## Catch-Up Window
 
@@ -78,11 +113,36 @@ The primary keeps the most recent `4096` entry frames in memory. When a replica 
 
 This is a short catch-up window, not durable log shipping. Blob frames are not retained in this buffer. If a replica falls behind beyond the in-memory window, use an external snapshot/copy procedure before reconnecting it.
 
+### Snapshot Boundary
+
+An external snapshot must preserve the files that make the Replica's local view coherent.
+
+| Area | Why it matters |
+|---|---|
+| `node.id` | Keeps the Replica mapped to its configured node id. |
+| WAL, SST, and manifest files | Preserve base key/value state. |
+| Blob directory | Preserves externalized large values. |
+| VersionLog files | Preserve version history when VersionLog is enabled. |
+| `cluster.akcc` | Preserves durable membership and policy. |
+| `cluster.identity` | Preserves secure transport identity. |
+
+After restoring a snapshot, start the Replica with the same node id and let the handshake request entries newer than its local sequence.
+
 ## ACK Behavior
 
 The replica only sends ACK frames for the configured stage. The primary waits up to about 5 seconds, checking every 50 ms. If the condition is not met before the deadline, the current implementation returns from the wait rather than throwing.
 
 Blob frames are sent to replicas but are not waited on by the entry acknowledgement policy.
+
+### ACK Semantics
+
+| Stage | What the Primary can infer |
+|---|---|
+| `RECEIVED` | The Replica decoded the entry frame. |
+| `APPLIED` | The Replica applied the entry to its local engine path. |
+| `DURABLE` | The Replica forced local durability after applying the entry. |
+
+`ALL_TARGETS` and `QUORUM` count live connected replicas that ACK the target sequence at the configured stage. They do not include future replicas, disconnected replicas, or blob payload completion.
 
 ## Wire Format
 
@@ -124,6 +184,19 @@ An `ACK` payload is:
 
 The reserved read messages are encoded by the framing layer, but the current replication client/server path does not expose a read protocol as a usable cluster feature.
 
+## Secure Handshake
+
+Secure mode wraps the replication frames with the native secure channel. The important identity inputs are:
+
+| Input | Role |
+|---|---|
+| Local identity seed | Durable secret material used to derive the local static public key. |
+| Ephemeral key | Per-session key material for the secure channel. |
+| Expected Primary id | Lets a Replica verify that it is connecting to the intended Primary node id. |
+| Pinned peers | Optional map from cluster node id to expected public key. |
+
+Identity seed rotation changes the node's public identity. If peers pin that public key, rotate pins and seeds as one operational change.
+
 ## Secure Channel
 
 `TransportMode::SECURE` opens the native secure channel before replication frames are exchanged. The identity seed is loaded or created and used to derive the local static public key.
@@ -132,9 +205,37 @@ Optional `pinnedPeers` can pin an expected public key for a cluster node id. Rep
 
 `TransportMode::PLAIN` is allowed only for advertised loopback, link-local, unique-local IPv6, or private IPv4 hosts.
 
+## Failure Behavior
+
+| Case | Current behavior |
+|---|---|
+| Replica starts before Primary | It retries connection and handshake in the background. |
+| Primary restarts | Replicas reconnect and request entries newer than their local sequence. |
+| Replica is behind within the buffer | Primary replays buffered entry frames after handshake. |
+| Replica is behind beyond the buffer | External snapshot/copy is required before reconnecting safely. |
+| ACK deadline expires | The wait returns after about 5 seconds; current code does not throw from the wait. |
+| Secure identity changes | Peers with pinned keys reject the unexpected identity. |
+| Two Primaries are started | Runtime does not elect or fence; this is a deployment error. |
+
 ## Cluster Manifest
 
 `cluster.akmf` records durable breadcrumbs for node join, node leave, and primary lease. The current manager writes these events, but does not replay them to rebuild membership or elect a primary.
+
+The primary lease breadcrumb records observed Primary ownership information, but it is not a consensus lease. Treat it as diagnostic state, not as a distributed lock.
+
+## Test Coverage
+
+The smoke tests exercise the current Cluster surface at integration level.
+
+| Area | Covered behavior |
+|---|---|
+| Config save/load | Binary persistence, CRC checks, and validation failures. |
+| Role selection | Primary and Replica startup validation. |
+| Replication | Entry and blob shipping between Primary and Replica. |
+| ACK modes | `NONE`, `ALL_TARGETS`, `QUORUM`, and ACK stages. |
+| Secure transport | Secure replication path and identity handling. |
+
+The tests do not prove automated failover, data rebalancing, or external snapshot orchestration, because those are outside the current runtime boundary.
 
 ## Operational Boundaries
 

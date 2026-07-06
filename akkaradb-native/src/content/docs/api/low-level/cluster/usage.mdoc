@@ -5,6 +5,22 @@ description: How to configure AkkEngine cluster nodes and start primary or repli
 
 Use this page when you want to configure cluster membership and start nodes. For runtime internals, routing, wire format, and operational boundaries, see [Cluster Architecture](/akkaradb-native/api/low-level/cluster/architecture/).
 
+## What You Must Provide
+
+Cluster does not discover peers on its own. Before enabling `components.clusterEnabled`, prepare the pieces that identify the local node and describe the cluster.
+
+| Item | Why it matters |
+|---|---|
+| Stable node id | Maps the local process to exactly one `NodeInfo` entry. |
+| Member list | Defines every known node, host, data/API port, replication port, and capability. |
+| Placement mode | Chooses local-only, mirror, or striped key ownership. |
+| Startup role | Explicitly starts the process as Primary or Replica. |
+| Primary endpoint | Lets a Replica find the Primary replication listener. |
+| ACK policy | Decides how much replica confirmation a Primary write waits for. |
+| Transport mode | Chooses plain local/private networking or secure replication. |
+
+Treat Cluster as a replication runtime and placement description. Service discovery, client routing, automated failover, and snapshot orchestration still belong to your server, control plane, or deployment tooling.
+
 ## Choose A Mode
 
 `ReplicationMode` controls placement and is stored in `ClusterConfig`.
@@ -16,6 +32,17 @@ Use this page when you want to configure cluster membership and start nodes. For
 | `STRIPE` | Each key is routed to one data-bearing node using deterministic rendezvous hashing. |
 
 `STRIPE` does not move existing data when the node set changes. Treat membership changes in striped deployments as an operational migration.
+
+### Mode Selection Guide
+
+| Goal | Start with | Notes |
+|---|---|---|
+| Single process or local tests | `STANDALONE` | Keeps Cluster disabled or local-only. |
+| Keep the same write stream on more than one node | `MIRROR` | Primary ships entries and blob payloads to Replica nodes. |
+| Assign each key to one data-bearing owner | `STRIPE` | Routing is deterministic, but migration is external. |
+| Automatic scale-out or rebalancing | External control plane | Cluster currently exposes primitives, not an autoscaling system. |
+
+For the current runtime, `MIRROR` is the most direct replicated deployment. `STRIPE` is useful when you are building an upper layer that can route clients, control membership changes, and handle data movement deliberately.
 
 ## Choose Startup Roles
 
@@ -29,6 +56,21 @@ Use this page when you want to configure cluster membership and start nodes. For
 
 Primary and replica are runtime roles. They are separate from placement mode: a mirrored cluster still has a primary process shipping writes and one or more replica processes consuming them.
 
+## Minimal Two-Node Rollout
+
+For a first replicated setup, keep the shape simple and explicit.
+
+| Step | Node 1 | Node 2 |
+|---|---|---|
+| Create `node.id` | `1` | `2` |
+| Write `cluster.akcc` | Same two-node membership | Same two-node membership |
+| Startup role | `PRIMARY` | `REPLICA` |
+| Primary id | `1` | `1` |
+| Replication port | Listen on node 1 `replPort` | Connect to node 1 `replPort` |
+| Data directory | Dedicated node 1 directory | Dedicated node 2 directory |
+
+Keep each process on its own `dataDir`. Do not point two nodes at the same WAL, SST, blob, or VersionLog files.
+
 ## Prepare Node Identity
 
 Every engine instance has a stable numeric node id. `AkkEngine::open()` loads it from `paths.nodeIdPath`; if the file is missing, it creates a random non-zero `uint64_t` and writes it to disk.
@@ -40,6 +82,8 @@ When `paths.dataDir` is set, the default path is:
 ```
 
 For non-standalone modes, that id must match one `NodeInfo::nodeId` in `ClusterConfig`. In practice, create or copy `node.id` before first clustered startup, or read the generated id and add it to the config before enabling `components.clusterEnabled`.
+
+`node.id` is local identity, not a generated cluster membership service. If you delete it and let the engine create another id, the process may no longer match the node entry that other peers expect.
 
 ## Define Cluster Config
 
@@ -87,6 +131,27 @@ cluster::ClusterConfig makeConfig() {
 
 `NodeInfo::host` is the address peer nodes use. `replPort` is the replication listener port. `dataPort` is recorded as the public data/API port for that node; it does not start the API server by itself.
 
+### Save A Durable Config
+
+`ClusterConfig` can be saved and loaded independently from `EngineOptions`. Store the same membership view on every node, then select the local role at runtime.
+
+```cpp
+cluster::ClusterConfig cfg = /* build or load from your own config source */;
+cfg.save("data/node-1/cluster.akcc");
+cfg.save("data/node-2/cluster.akcc");
+```
+
+Then point each process at its local copy:
+
+```cpp
+EngineOptions opts;
+opts.components.clusterEnabled = true;
+opts.paths.dataDir = "data/node-2";
+opts.paths.clusterConfigPath = "data/node-2/cluster.akcc";
+```
+
+`cluster.akcc` stores the durable membership, placement, capabilities, and ACK policy. Runtime-only values such as local startup role, secure pins, primary overrides, and bind host stay in `EngineOptions`.
+
 ## Start A Primary
 
 Enable the cluster component before `AkkEngine::open()`. The engine uses `opts.cluster.config` when provided; otherwise it loads `paths.clusterConfigPath`.
@@ -106,6 +171,8 @@ auto db = engine::AkkEngine::open(std::move(opts));
 ```
 
 Primary startup fails if the local node id is missing from config or the local node is not `COORDINATOR_ELIGIBLE`. The replication listener uses the local node's configured `replPort`.
+
+Only one process should be started as Primary for a given write stream. The current Cluster runtime does not provide leader election or fencing, so preventing split-brain is the responsibility of the deployment layer.
 
 ## Start A Replica
 
@@ -137,6 +204,30 @@ Replica startup fails when the primary id is missing, points at the local node, 
 
 The replica client reconnects in the background. If a connection attempt or handshake fails, it waits about 200 ms and tries again while the engine remains open.
 
+## Add Or Restart A Replica
+
+Use this path when the Replica is new or has been down only briefly enough for an external snapshot or the in-memory catch-up window to cover the gap.
+
+1. Stop writes or take a consistent source copy if the Replica needs a fresh snapshot.
+2. Create a dedicated `dataDir` and stable `node.id` for the Replica.
+3. Place a `cluster.akcc` that includes both the Primary and the Replica.
+4. Start the process with `NodeStartupRole::REPLICA` and the expected `primaryNodeId`.
+5. Watch logs and stats until the Replica has connected and applied new entries.
+
+The Primary keeps only a short in-memory entry buffer. A Replica that missed more history than that buffer contains needs an external data copy before reconnecting.
+
+## Stop Or Remove A Replica
+
+For a planned removal:
+
+1. Stop the Replica process.
+2. Update the durable cluster config used by the remaining nodes.
+3. Restart or reload the processes according to your deployment model.
+4. Review the Primary ACK policy. `ALL_TARGETS` and `QUORUM` depend on live replica counts.
+5. Remove or archive the Replica data directory only after you no longer need it for recovery.
+
+Current membership changes are configuration changes. Cluster does not rebalance striped data or migrate files automatically.
+
 ## Configure ACK Policy
 
 `AckPolicy` controls how long primary writes wait for replica confirmation.
@@ -157,6 +248,24 @@ The replica client reconnects in the background. If a connection attempt or hand
 
 Higher stages give stronger confirmation and higher write latency. Blob frames are sent to replicas but are not waited on by the entry acknowledgement policy.
 
+### ACK Policy Examples
+
+```cpp
+cluster::AckPolicy fireAndForget;
+fireAndForget.mode = cluster::AckPolicyMode::NONE;
+
+cluster::AckPolicy appliedOnAll;
+appliedOnAll.mode = cluster::AckPolicyMode::ALL_TARGETS;
+appliedOnAll.stage = cluster::AckStage::APPLIED;
+
+cluster::AckPolicy oneDurableReplica;
+oneDurableReplica.mode = cluster::AckPolicyMode::QUORUM;
+oneDurableReplica.quorum = 1;
+oneDurableReplica.stage = cluster::AckStage::DURABLE;
+```
+
+`DURABLE` asks the Replica to force its local durability path before ACKing. It is the strongest built-in stage, but it is also the most expensive. Choose it for flows where recovery semantics matter more than write latency.
+
 ## Configure Secure Transport
 
 `TransportMode::SECURE` uses the native secure channel before replication frames are exchanged. If `secure.identitySeedPath` is empty and `paths.dataDir` is set, the runtime uses:
@@ -173,6 +282,17 @@ opts.cluster.runtime.secure.expectedPrimaryNodeId = 1;
 
 `TransportMode::PLAIN` is allowed only when every advertised node host is loopback, link-local, unique-local IPv6, or private IPv4. Public/WAN hosts are rejected and should use `SECURE`.
 
+### Pin Primary Identity
+
+For secure replication, a Replica can require the Primary to match the expected node id:
+
+```cpp
+opts.cluster.runtime.primaryNodeId = 1;
+opts.cluster.runtime.secure.expectedPrimaryNodeId = 1;
+```
+
+For stricter peer validation, populate `pinnedPeers` with the expected public key for each cluster node id. The key is derived from that node's `cluster.identity` seed. Keep the identity seed durable and backed up; replacing it changes the node's secure identity.
+
 ## Durable Files
 
 When `paths.dataDir` is set, cluster-related paths default to:
@@ -186,6 +306,20 @@ When `paths.dataDir` is set, cluster-related paths default to:
 
 `cluster.akcc` stores membership and policy. Runtime-only values such as `replBindHost`, primary overrides, secure pins, and transport mode are not serialized into the cluster config.
 
+## Operational Playbooks
+
+### Planned Replica Restart
+
+Stop the Replica, keep its data directory intact, and start it again with the same `node.id` and config. If the outage is short, the Primary may replay buffered entries during handshake. If it was long, refresh the Replica from a snapshot before reconnecting it.
+
+### Primary Process Restart
+
+Stop writes before restarting the Primary. Start it again with the same `node.id`, config, and `PRIMARY` role. Replicas reconnect in the background and resume from their last local sequence within the available catch-up window.
+
+### Manual Failover
+
+Promoting another node is an operational procedure, not automatic runtime behavior. Choose the target, ensure its data is current enough for your application, update the config and client routing, then start exactly one process as `PRIMARY`.
+
 ## Startup Failure Checklist
 
 | Symptom | Check |
@@ -196,3 +330,13 @@ When `paths.dataDir` is set, cluster-related paths default to:
 | Config load fails | `cluster.akcc` is missing, truncated, wrong version, or has a CRC mismatch. |
 | Plain transport is rejected | One or more `NodeInfo::host` values are public/WAN addresses. |
 | Cluster backend is unavailable | The cluster runtime backend was not linked or could not be loaded from `runtimeBackendPath`. |
+
+## Runtime Checklist
+
+| Symptom | Check |
+|---|---|
+| Replica keeps reconnecting | Primary host, `replPort`, transport mode, and secure identity expectations. |
+| Writes do not wait for replicas | `AckPolicyMode` may be `NONE`, or no live replicas satisfy the policy. |
+| `QUORUM` never completes | `quorum` may be larger than the number of connected replicas that can ACK the chosen stage. |
+| Blob data is missing after reconnect | Blob frames are not retained in the Primary catch-up buffer; use snapshot/copy for long gaps. |
+| Striped reads miss data after membership change | `STRIPE` ownership changed without an external migration. |
