@@ -1,318 +1,213 @@
 ---
 title: 高レベル API のアーキテクチャ
-description: AkkaraDB と PackedTable が typed Kotlin data を AkkEngine storage に対応させる仕組み。
+description: Native C++ の typed table API が struct を AkkEngine storage に対応させる仕組み。
 ---
 
-高レベル API は、AkkEngine の上にある Kotlin/JVM facade です。application code からは typed に見えますが、保存経路は低レベル API で説明している byte-oriented engine です。
+Native 高レベル API は、`AkkEngine` の上にある header-driven な C++ 層です。別の storage engine を作るわけではありません。決定的な table prefix を作り、struct を BinPack で encode し、row-id metadata を管理し、永続化は byte-oriented な engine に委譲します。
 
-## 実行時の部品
+## runtime parts
 
-| 部品 | 役割 |
+| Part | Responsibility |
 |---|---|
-| `AkkaraDB` | `AkkEngine` instance を持ち、`PackedTable` handle を開きます。 |
-| `PackedTable<T, ID>` | table name、primary key、entity bytes、index、row-id metadata、query scan を engine operation に対応させます。 |
-| `SchemaSerializer` | Kotlin data-class constructor schema を serialize して native table layer に渡します。 |
-| `BinPack` | entity value、key、ref、custom mapped type を encode / decode します。 |
-| `AkkSequence<T>` | native cursor または Kotlin cursor を wrap し、terminal operation 後に close します。 |
-| `AkkaraSchema` | table 間に hook-based referential action を追加します。 |
-
-`PackedTable` は現在 `JNIPackedTable` として実装されています。table は engine handle、table prefix、serialized schema bytes を使って native table handle を開きます。
+| `AkkaraDB` | `engine::AkkEngine` を所有し、`table<&T::id>()` と schema 登録を提供します。 |
+| `PackedTable<PrimaryKeyPtr>` | typed operation を engine key、value、scan、metadata write に変換します。 |
+| `BinPack` | primary key、entity、index value、ref、optional value、map、nested struct を encode / decode します。 |
+| `AKKARADB_ENTITY` | C++ struct の `RefTraits` と query proxy field を登録します。 |
+| `Ref<T>` | key、row id、loaded entity を保持し、table binding 経由で解決します。 |
+| `Schema` | table holder を登録し、hook ベースの foreign-key action を設定します。 |
 
 ## layering
 
-高レベル API は client-side convenience layer です。storage engine、API server、cluster runtime、VersionLog を置き換えるものではありません。
-
-| layer | そこで起きること |
+| Layer | What happens there |
 |---|---|
-| Kotlin application | `AkkaraDB`、`PackedTable`、query helper、ref、schema hook を呼びます。 |
-| JVM binding | entity と key を encode し、table handle を管理し、JNI を呼びます。 |
-| native table layer | schema bytes を使って indexed put/remove と native query scan を行います。 |
-| `AkkEngine` | byte key/value を保存し、WAL、memtable、SST、Blob、VersionLog、runtime component を扱います。 |
+| Application C++ | `AkkaraDB`、`PackedTable`、query expression、ref、join、schema hook を呼びます。 |
+| Native high-level API | struct を encode し、table / index / metadata key を作り、row-id mapping を管理し、hook を実行します。 |
+| `AkkEngine` | bytes、WAL record、memtable、SSTable、blob、VersionLog data、必要なら server / cluster component を扱います。 |
 
-このため、高レベル table の durability と performance characteristics は、下にある engine configuration を継承します。
+高レベル API の durability、compaction、blob、VersionLog、API server、cluster の挙動は、設定された `AkkEngine` から引き継がれます。
 
 ## table namespace
 
-各 table name は 8-byte namespace prefix に hash されます。table row は次の key で保存されます。
+各 table name は 8-byte prefix に変換されます。row は次の形で保存されます。
 
 ```text
 [tablePrefix][encodedPrimaryKey]
 ```
 
-同じ engine の key space に、複数の typed table、index、metadata key を置けます。
+table は table name から派生した metadata prefix も所有します。
 
-| namespace | 用途 |
+| Prefix purpose | Used for |
 |---|---|
-| `tableName` | entity row。 |
-| `tableName:idx:<field>` | secondary index entry。 |
-| `tableName:sys:pk2row` | primary-key から row-id への mapping。 |
-| `tableName:sys:row2pk` | row-id から primary-key への mapping。 |
-| `tableName:sys:nextrow` | 次の row-id counter。 |
+| table rows | encode された entity value。 |
+| `idx:<field>` | 登録済み field の secondary index entries。 |
+| `pk2row` | primary key から stable row id への mapping。 |
+| `row2pk` | stable row id から現在の primary key への mapping。 |
+| `nextrow` | row-id allocation counter。 |
 
-namespace hash は table name に対して deterministic です。table name を変えると prefix も変わるため、別の key range を指します。
+table name は物理的な storage layout の一部です。table name を変えると、API は別の key range を見ることになります。
 
-### metadata ownership
+## primary-key encoding
 
-`PackedTable` は metadata を user data と同じ engine namespace に書きます。metadata key は table implementation の内部情報です。
+primary key type は `PackedTable` に渡した member pointer から推論されます。
 
-| metadata | 必要になる場面 |
-|---|---|
-| `pk2row` | primary key から stable row id を解決する。 |
-| `row2pk` | `AkkRef` から現在の primary key を解決する。 |
-| `nextrow` | 新しい row id を割り当てる。 |
-| custom index keys | Kotlin extractor による custom index lookup。 |
+```cpp
+auto users = db->table<&User::id>("users");
+```
 
-backup、snapshot、migration tooling では、これらの key を table row と一緒に保持する必要があります。
-
-## primary key encoding
-
-numeric primary key は sortable bytes に encode されます。
-
-| Kotlin type | encoding shape |
-|---|---|
-| `Byte` | sign bit を flip した 1 byte。 |
-| `Short` | sign flip 後の big-endian sortable unsigned bytes。 |
-| `Int` | sign flip 後の big-endian sortable unsigned bytes。 |
-| `Long` | sign flip 後の big-endian sortable unsigned bytes。 |
-| その他の対応型 | BinPack encoding。 |
-
-これにより、numeric range scan は engine key order を使いながら自然な numeric order を保てます。
-
-## entity schema
-
-`SchemaSerializer` は Kotlin data class の primary constructor を読みます。各 constructor parameter について、field count、field name、type descriptor を compact descriptor として書き出します。
-
-descriptor は scalar type、string、list、map、nested struct、nullable field、custom BinPack alias に対応します。primary constructor がない class や、descriptor 化できない field type がある class は table open 時に失敗します。
-
-native table layer は、`PackedTable` open 時に schema bytes を受け取ります。query scan では、同じ schema bytes を使って serialized query AST を stored row value に対して評価します。
+数値 key は、lexicographic byte order が numeric order と一致するように encode されます。それ以外の対応済み value は BinPack encoding を使います。encoded primary key は row key では table prefix に、row-id metadata では metadata prefix に追加されます。
 
 ## write path
 
-`put(entity)` は次の流れです。
+`put(entity)` は、下層 engine write の前後で次の処理を行います。
 
-1. primary key を取り出します。
-2. primary key を encode し、engine key を作ります。
-3. primary key に対応する row id を取得、または割り当てます。
-4. 既存 entity があれば読みます。
-5. replacement の場合は update transform を走らせます。
-6. 古い custom index entry を消します。
-7. native indexed put path で entity を書きます。
-8. custom index entry を作り直します。
-9. primary-key / row-id mapping を書きます。
+1. temporary arena-backed buffer を reset する。
+2. `entity.*PrimaryKeyPtr` から primary key を取り出す。
+3. table row key を作る。
+4. hook や index が必要なら以前の entity を読む。
+5. replacement の場合、update hook と immutable-field check を実行する。
+6. `Ref<T>` field を attach し、dirty ref を flush する。
+7. 登録済み foreign key を validate する。
+8. entity を BinPack で encode する。
+9. `AkkEngine` に key/value を書く。
+10. stable row id を allocate または reuse する。
+11. row-id metadata を更新する。
+12. secondary index entry を再構築する。
 
-native field index は native table path が maintenance します。custom index は Kotlin 側で、row write の前後に index key を remove / add します。
+これは 1 つの logical table write の周辺で複数の engine operation を行います。高レベル API は `AkkEngine` の上に multi-row transaction manager を追加しません。
 
-### update hook と immutability
+## read path
 
-replacement write では、final entity を encode する前に update transform hook が走ります。hook 実行後、table は immutable field が予期せず変わっていないかを検証します。primary key を変える必要がある場合は、`updatePrimaryKey()` が明示的な経路です。
+`get(pk)` は同じ namespaced key を作り、`AkkEngine` から value bytes を読みます。`getInto(pk, out)` は既存 object に直接 decode します。
 
-これにより、普通の `put()` で accidental primary-key movement が起きにくくなり、`AkkRef` の挙動も保ちやすくなります。
+decode 後、table は ref binding を attach し、immutable field を seal します。これにより、読み込まれた `Ref<T>` field は table schema 経由で解決でき、読み込まれた `Immutable<T>` field は accidental mutation を拒否できます。
 
-## read / scan path
+## scans
 
-`get(pk)` は typed primary key を encode し、namespaced engine key を作り、engine から bytes を読んで BinPack で entity に decode します。
+`scanAll()` は table prefix の start/end range を作り、engine scan result を走査します。返ってきた key は table prefix と一致するか確認され、primary-key suffix は `Entry::id` に、value bytes は `Entry::value` に decode されます。
 
-`scan()` は `[tablePrefix, nextPrefix(tablePrefix))` の range を scan し、primary-key suffix と entity bytes を decode します。`scanAll()` は primary-key decode を省略して value だけを返します。
+`scan(startPk, endPk)` は encoded primary key から正確な key boundary を作ります。数値 key は sortable なので、numeric range scan は自然な数値順になります。
 
-`AkkSequence` は scan を lazy に保ちます。`toList()`、`firstOrNull()`、`count()`、`forEach()` のような terminal operation は cursor を開き、消費し、`finally` で close します。
+## secondary indexes
 
-## secondary index
+`index<&Field>()` は field 用の `IndexDef` を登録し、`Index<FieldPtr>` object を返します。
 
-index path は 2 種類あります。
+index entry には candidate primary-key bytes を見つけるための情報が保存されます。`Index::find(value)` は encoded field value の index prefix を scan し、index key から primary-key bytes を取り出し、primary key で現在の entity を読みます。
 
-| index type | 作り方 | native query planner で使えるか | maintenance |
-|---|---|---|---|
-| native field index | `index<F>("fieldName")` | Yes | native table path。 |
-| custom index | `index("name") { entity -> value }` | No | Kotlin-side custom index keys。 |
+| Operation | Index maintenance |
+|---|---|
+| `put()` insert | entity write 後に index entry を書きます。 |
+| `put()` replacement | 古い index entry を消してから新しい entry を書きます。 |
+| `remove()` | row metadata を消す前に古い index entry を消します。 |
+| `updatePrimaryKey()` | 新しい index entry を書き、古い primary-key entry を消します。 |
 
-`findBy()` はまず登録済み index を見ます。登録済み index がない場合は equality query を作り、`runQ()` を呼びます。
+index の自動 backfill はありません。既存 row を index に反映したい場合は、application 側で row を rewrite します。
 
-`runQ()` は query に registered queryable field index への equality probe が含まれるか確認します。含まれる場合は index query scan を開きます。含まれない場合は table key range 全体に対する query scan を開きます。
+## query model
 
-### backfill boundary
+C++ query API は、overloaded operator と field proxy object で expression type を組み立てます。
 
-index registration は既存 table row を scan しません。実装上は、native index metadata を登録するか、future write 用の custom index object を作るだけです。既存 row は rewrite または explicit rebuild されるまで、新しい index からは見えません。
-
-production data では、index creation を migration step として扱います。
-
-1. index を登録する。
-2. existing rows を scan する。
-3. 各 row を re-put するか、dedicated rebuild path を実行する。
-4. rebuild 完了後に indexed read を serving する。
-
-## query DSL の境界
-
-`@AkkQueryDsl` 付き Kotlin lambda を受け取る関数は、runtime で解釈される lambda ではありません。AkkaraDB compiler plugin の placeholder です。
-
-compiler plugin がない場合、次の call は例外を投げます。
-
-```kotlin
-users.query { age >= 18 }
-users.firstOrNull { name == "Alice" }
-users.runToList { age > 30 }
+```cpp
+profiles.query([](auto profile) {
+    return profile.email == "a@example.test" && profile.age >= 18;
+});
 ```
 
-plugin はこれらの call を、serialized query AST を渡す `runQ()` call に rewrite します。手動で `AkkQuery` を組み立てる code は `runQ()` を直接呼べます。
+`AKKARADB_QUERYABLE` は entity 用の `akkaradbQueryProxy()` overload を作ります。`query()` は predicate にその proxy を渡し、返ってきた expression tree を `QueryView` に保持します。
 
-### rewritten expression model
+対応している expression family は次の通りです。
 
-compiler plugin は supported Kotlin expression を query AST に lower します。
-
-| Kotlin expression | AST operation |
+| Expression | Internal shape |
 |---|---|
-| `field == value` | `EQ` |
-| `field != value` | `NEQ` |
-| `<`、`<=`、`>`、`>=` | `LT`、`LE`、`GT`、`GE` |
-| `a && b`、`a || b` | `AND`、`OR` |
-| `!expr` | `NOT` |
-| `field == null`、`field != null` | `IS_NULL`、`IS_NOT_NULL` |
-| `x in values`、`x !in values` | `IN`、`NOT_IN` |
-| `map["key"]` | `MAP_GET` |
-| `string.startsWith(prefix)` | `STARTS_WITH` |
-| `string.contains(part)` | `CONTAINS` |
-| `string.like(pattern)` | `LIKE` |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | `Compare<Op, L, R>` |
+| `&&`, `||`, `!` | logical expression types。 |
+| `in`, `notIn` | list membership comparisons。 |
+| `startsWith`, `contains`, `like` | string-oriented comparisons。 |
+| `isNull`, `isNotNull` | optional/null checks。 |
+| `field<&Nested::x>()` | nested field path。 |
+| `get(key)` / `mapGet(key)` | map lookup expression。 |
 
-field access は、`address.city` のような nested path を含む field name に解決されます。outer variable は query object の capture になります。
+## query planning
 
-### planning model
+`QueryView::begin()` は `PackedTable` に `QueryPlan` を作らせます。plan は次のどちらかを選びます。
 
-runtime planner は、queryable registered index に対する equality probe を探します。直接の equality、または `AND` の内側にある equality を seed にできます。最初に見つかった usable equality probe が index scan seed になり、full query は final filtering のため native query scan に渡されます。
-
-range predicate だけの query、string predicate、`OR`、unindexed equality は table range scan に fallback します。正しく動きますが、index-seeded ではありません。
-
-## coroutine boundary
-
-coroutine helper は、synchronous storage call を `withContext(dispatcher)` で wrap するか、cursor consumption を `Flow` として expose します。
-
-| helper shape | behavior |
+| Source | Behavior |
 |---|---|
-| `getAsync`、`putAsync`、`removeAsync`、`upsertAsync` | synchronous operation を指定 dispatcher 上で実行します。 |
-| `scanFlow`、`scanAllFlow`、`findByFlow`、`runQFlow` | underlying `AkkSequence` を consume し、値を `Flow` として emit します。 |
-| `historyFlow` | VersionLog entries を Flow wrapper で stream します。 |
+| `TABLE` | table key range を scan し、各 row に expression を評価します。 |
+| `INDEX` | 1 つ以上の index range を scan し、candidate row を primary key で読み、必要なら dedupe してから完全な expression を評価します。 |
 
-Kotlin service の structured concurrency には便利ですが、下にある native work は blocking work のままです。
+planner は、登録済み index を使える predicate を探します。返される row は常に完全な expression で filter されるため、index は candidate set を狭める役割です。
 
-## consistency model
+## row-id metadata
 
-高レベル layer は、`AkkEngine` の上に transaction manager を追加しません。
+各 table は、見えている primary key とは別に stable row id を持ちます。
 
-| operation | atomicity boundary |
+| Metadata | Purpose |
 |---|---|
-| single engine `put` / `remove` | underlying engine write path を使います。 |
-| `PackedTable.put()` | entity と table metadata/index entries を一連の engine operations として書きます。 |
-| `updatePrimaryKey()` | new row を書き、row-id metadata を書き換え、old key を消します。 |
-| foreign-key cascade/set-null | hook-driven changes を row by row で適用します。 |
-| join helpers | scan/lookup で current table state を読みます。join helper 自体は snapshot transaction を作りません。 |
+| `pk2row` | primary key から stable row id を解決します。 |
+| `row2pk` | row id から現在の primary key を解決します。 |
+| `nextrow` | 次の row id を allocate します。 |
 
-multi-row atomicity が必要な application invariant では、明示的な coordination layer を作るか、可能なら 1 value の中に invariant を閉じ込めます。
+`updatePrimaryKey()` は row id を保ったまま mapping を書き換えます。これにより `Ref<T>` は primary-key change をまたいで解決できます。
 
-## performance model
+## references
 
-| path | expected cost shape |
+`Ref<T>` は known primary key、known row id、loaded value、dirty value を保持できます。解決は `RefBinding<T>` 経由で遅延実行されます。
+
+| State | Meaning |
 |---|---|
-| `get(pk)` | 1 primary-key lookup + decode。 |
-| `put(entity)` | entity write + row-id metadata + native index work + custom index maintenance。 |
-| native field index 付き `findBy()` | index scan + decode。 |
-| index probe 付き `runQ()` | index-seeded query scan。 |
-| index probe なし `runQ()` | table-range query scan。 |
-| `join(right) { pk }` | left scan + row ごとの right primary-key lookup。 |
-| arbitrary-key join | left scan × right scan。 |
-| foreign-key action | referencing rows を探す source-table scan。 |
+| key known | `id()` が table lookup なしで返せます。 |
+| row id known | `rowId()` が row-id metadata 経由で解決できます。 |
+| loaded | `operator->` と `operator*` が entity を返せます。 |
+| dirty | owner write 時に referenced entity を flush する必要があります。 |
+| attached | 解決用の table binding があります。 |
 
-つまり、高レベル API layer では index planning と schema-hook usage が主な設計レバーになります。
+table が entity を decode すると ref binding を attach します。table が entity を write すると owner を encode する前に dirty ref を flush します。
 
-## backup and restore
+## joins
 
-backup には engine files と table metadata の両方を含めます。typed table deployment では次を保持します。
+join helper は typed read view であり、native join engine ではありません。
 
-| data | why |
+| Join form | Execution shape |
 |---|---|
-| engine data files | actual key/value rows、indexes、metadata、WAL/SST/blob state。 |
-| `pk2row`、`row2pk`、`nextrow` metadata | `AkkRef` と row-id operations に必要です。 |
-| custom index keys | custom `findBy()` results に必要です。 |
-| VersionLog files | `getAt()`、`history()`、rollback に必要です。 |
-| restore 時に使う engine options/config | VersionLog、Blob、Cluster、server components の有効/無効を決めます。 |
+| `join<&RefField>(right)` | left table を scan し、right-table row-id lookup で ref を解決します。 |
+| `join<&LeftField, &RightPk>(right)` | left を scan し、right primary-key lookup を行います。 |
+| `join<&LeftField, &RightField>(right)` | left を scan し、matching field を探すために right も scan します。 |
 
-visible table rows だけを restore して metadata を落とすと、ref、custom index、row-id operations が inconsistent になる可能性があります。
+各 join row は left `Entry` と decode 済み right entity を持ちます。`where()`、`first()`、`any()`、`count()`、`toVector()` は view 上で評価されます。
 
-## row id reference
+## schema hooks
 
-`AkkRef<T>` は internal row id を保存します。`PackedTable` は primary key と row id の bidirectional mapping を保持します。
+`AkkaraDB::Schema` は C++ entity type を key にして table holder を保持します。また、登録済み table 間で `Ref<T>` field を解決するための ref binding も提供します。
 
-これにより、primary-key update をしても reference が安定します。
+`foreignKey()` は source table または target table に hook を追加して動作します。
 
-1. `ref(pk)` が primary key の現在の row id を解決します。
-2. `updatePrimaryKey(oldPk, entity)` が new primary key の下に row を書きます。
-3. row-id mapping が old key から new key へ書き換わります。
-4. 既存の `AkkRef(rowId)` は `rowIdToPk` 経由で解決できます。
-
-tradeoff として、row-id mapping は同じ engine key space 内の追加 metadata row になります。
-
-## join
-
-join helper は Kotlin-level view です。現在は native join plan を作りません。
-
-| join form | shape |
+| Hook area | Purpose |
 |---|---|
-| `join(right) { left -> rightPk }` | left を scan し、right を primary-key lookup します。 |
-| `joinRef(right) { left -> ref }` | left を scan し、right の row-id ref を resolve します。 |
-| `join(right, leftKey, rightKey)` | left を scan し、matching key を探すために right も scan します。 |
+| Source `put()` | 存在しない target への参照を拒否します。 |
+| Target `remove()` | `Restrict`、`Cascade`、`SetNull` を delete に適用します。 |
+| Target primary-key update | key movement に対して `Restrict`、`Cascade`、`SetNull` を適用します。 |
 
-これらの helper は local app logic、test、tooling には便利です。大きな cross-table join では、明示的な index や application-level query plan を設計するのが自然です。
+foreign-key action は referencing row を見つけるために source table を scan します。大きい table で高速な reference check が必要な場合は、明示的な index や application-level lookup structure を用意します。
 
-## schema hook
+## consistency boundary
 
-`AkkaraSchema.foreignKey()` は native constraint object を作りません。source / target table に hook を登録します。
+高レベル API は engine の上にある薄い層です。1 つの `PackedTable` operation でも、entity、row-id metadata、index key を複数回書く場合があります。schema action は複数 row を書く場合があります。join は scan と lookup で現在状態を読みます。
 
-| hook | 目的 |
+all-or-nothing な multi-row invariant が必要な場合は、table API の上に明示的な coordination layer を作るか、invariant を 1 つの stored value の中に閉じ込める設計にします。
+
+## backup と migration
+
+backup では table row と table metadata を一緒に保持する必要があります。
+
+| Data | Why |
 |---|---|
-| source before put | 参照先 target が存在することを検証します。 |
-| target before remove | delete に対する `Restrict`、`Cascade`、`SetNull` を適用します。 |
-| target before primary-key update | key change 前に update restriction を enforce します。 |
-| target after primary-key update | new key が存在した後に cascade / set-null update を適用します。 |
+| Engine files | 実際の stored rows、WAL/SST/blob state、low-level metadata。 |
+| Row-id mappings | `Ref<T>`、`getByRowId()`、`updatePrimaryKey()` の安定性に必要です。 |
+| Index entries | `Index::find()` と indexed query planning に必要です。 |
+| VersionLog data | engine が historical read や rollback を使う設定なら必要です。 |
 
-実装は source table を scan して referencing row を探します。単純で予測しやすい一方、native indexed constraint engine の代替ではありません。
+migration tooling では、table name、primary-key type、indexed fields、struct encoding を storage layout decision として扱います。
 
-## テストで確認している範囲
+## low-level API に降りる場合
 
-integration test では、現在の high-level behavior の主要部分を確認しています。
-
-| 領域 | 確認していること |
-|---|---|
-| basic table operations | `put`、`get`、`remove`、reopen、`AkkaraDB.open()` 経由の persistence。 |
-| indexes | native field index lookup、custom index lookup、replacement write 時の index update。 |
-| query scans | `runQ()` filtering と indexed query planning。 |
-| VersionLog bridge | typed key 経由の `getAt()`、`history()`、rollback。 |
-| primary-key updates | row move、index、row-id mapping の整合性。 |
-| upsert and hooks | immutable-style update と update transform。 |
-| references and joins | `AkkRef`、attached ref、`join()`、`joinRef()`。 |
-| schema hooks | delete/update に対する `Restrict`、`Cascade`、`SetNull`。 |
-
-これらの test は、foreign key を native constraint engine にするものではなく、server / cluster boundary を跨ぐ distributed transaction model を証明するものでもありません。
-
-## 境界
-
-次の境界は明示しておきます。
-
-- table name は physical key layout の一部です。
-- index は、その index で探したい row を書く前に登録します。
-- compiler-plugin query call は runtime-interpreted lambda ではありません。
-- foreign key は hook-based で、source table を scan します。
-- `AkkRef` は table の row-id metadata に依存します。
-- concurrency と durability の挙動は下にある `AkkEngine` に従います。
-- 高レベル layer には online schema migration coordinator はありません。
-- Kotlin join helper の背後に native join planner はありません。
-- schema hook / cascade operation を囲む multi-table transaction layer はありません。
-
-## 低レベルへ降りる場面
-
-次の用途では、高レベル API より低レベル API が向いています。
-
-| need | better layer |
-|---|---|
-| exact binary key layout | `AkkEngine` byte API。 |
-| custom network protocol | API server または direct engine integration。 |
-| cross-language typed storage | byte key の上に explicit encoding/protocol を定義する。 |
-| online cluster topology management | Cluster/control-plane layer。 |
-| native C++ embedding | `akkaradb::engine::AkkEngine`。 |
-| bulk migration tooling | low-level scan + explicit decode/rewrite logic が向くことが多いです。 |
+byte layout を完全に制御したい場合、custom protocol / server layer を作る場合、struct 以外の encoding を使う場合、大量データの storage surgery をする場合、engine subsystem を直接検証する場合は `engine::AkkEngine` を使います。typed struct、table-local index、query expression、ref、schema hook が主な価値なら高レベル API を使います。

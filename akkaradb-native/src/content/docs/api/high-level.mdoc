@@ -1,28 +1,28 @@
 ---
 title: High-Level API
-description: Typed Kotlin API built on top of AkkEngine and PackedTable.
+description: Native C++ typed table API built on top of AkkEngine.
 ---
 
-The high-level API is the typed Kotlin/JVM layer over AkkEngine. It lets application code work with Kotlin data classes through `AkkaraDB`, `PackedTable`, secondary indexes, row-id references, joins, and schema hooks instead of manually building byte keys and byte values.
+The native high-level API is the C++ typed table layer in `akkaradb/AkkaraDB.hpp`. It keeps the direct `AkkEngine` storage model, but lets C++ code work with structs, primary keys, secondary indexes, query expressions, references, joins, and schema hooks.
 
-Use it when your application wants a table-like API and stable Kotlin types. Use the low-level `AkkEngine` API when you need direct binary key layout control, custom protocols, native C++ integration, or engine internals.
+Use it when you are embedding AkkaraDB Native in a C++ application and want table-like operations without manually building byte keys and byte values. Use the low-level `AkkEngine` API when you need exact control over the binary key layout, server/protocol integration, or internal engine behavior.
 
 ## Read By Goal
 
 | Goal | Page |
 |---|---|
-| Open a database, define tables, and perform typed operations | [High-Level API Usage](/akkaradb-native/api/high-level/usage/) |
-| Understand how tables, keys, indexes, refs, and schema hooks map onto AkkEngine | [High-Level API Architecture](/akkaradb-native/api/high-level/architecture/) |
+| Open a database, define structs, and use typed table operations | [High-Level API Usage](/akkaradb-native/api/high-level/usage/) |
+| Understand how typed tables, indexes, refs, joins, and schema hooks map onto `AkkEngine` | [High-Level API Architecture](/akkaradb-native/api/high-level/architecture/) |
 
 ## Main Types
 
 | Type | Role |
 |---|---|
-| `AkkaraDB` | Owns an `AkkEngine` handle and opens typed tables. |
-| `PackedTable<T, ID>` | Stores Kotlin entities by primary key and exposes typed CRUD, scan, query, index, and reference helpers. |
-| `AkkSequence<T>` | Lazy cursor-backed sequence returned by scans, indexes, queries, and joins. |
-| `AkkRef<T>` | Stable row-id reference to another table entry. |
-| `AkkaraSchema` | Registers tables and foreign-key style hooks. |
+| `akkaradb::AkkaraDB` | Owns an `engine::AkkEngine` instance and opens typed tables. |
+| `akkaradb::PackedTable<&T::id>` | Stores C++ structs by primary key and exposes typed CRUD, scan, query, index, reference, and join helpers. |
+| `AKKARADB_ENTITY(Type, PrimaryKey, ...)` | Registers primary-key metadata and queryable fields for a struct. |
+| `AKKARADB_QUERYABLE(Type, ...)` | Registers fields for the C++ query proxy without declaring reference traits. |
+| `akkaradb::Ref<T>` | Stores a stable row-id based reference to another entity. |
+| `akkaradb::AkkaraDB::Schema` | Registers tables and foreign-key style hook behavior. |
 
-This layer is still backed by AkkEngine. Durability, VersionLog, compaction, blobs, and server/cluster behavior are controlled by the underlying engine options.
-
+This layer is still backed by `AkkEngine`. WAL, memtables, SSTables, blobs, VersionLog, API server, and cluster behavior are controlled by the engine options used when the database is opened.
