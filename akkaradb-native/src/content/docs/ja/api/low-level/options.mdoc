@@ -136,7 +136,7 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 
 `history()`、`getAt()`、`rollbackKey()`、`rollbackTo()` を使う場合は、エンジンを開く前に `components.versionLogEnabled` を有効化します。
 
-使い方、ロールバックの挙動、ファイル形式、運用時の注意点は [VersionLog](/akkaradb-native/ja/api/low-level/version-log/) に分けています。
+使い方とロールバックの挙動は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に、ファイル形式と運用時の注意点は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。
 
 ## Manifest とクラスタ
 

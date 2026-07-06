@@ -1,0 +1,159 @@
+---
+title: VersionLog の使い方
+description: バージョン履歴の有効化、過去時点読み取り、ロールバック操作の使い方です。
+---
+
+このページは、VersionLog を有効にして、履歴取得、過去時点読み取り、ロールバック API を使いたい場合に読むページです。保存形式、復旧、永続化境界、運用上の制限は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。
+
+## 使い方
+
+### 履歴を有効にする
+
+バージョン履歴はデフォルトでは無効です。エンジンを開く前に有効化します。
+
+```cpp
+akkaradb::engine::AkkEngineOptions opts;
+opts.paths.dataDir = "data/history";
+opts.components.versionLogEnabled = true;
+opts.vlog.syncMode = akkaradb::engine::vlog::VLogSyncMode::BATCHED_SYNC;
+
+auto db = akkaradb::engine::AkkEngine::open(std::move(opts));
+```
+
+`paths.dataDir` を指定すると、`paths.versionLogPath` は `<dataDir>/history.akvlog` から派生します。`opts.vlog.logPath` を直接指定した場合は、そのパスが優先されます。
+
+### キーの履歴を読む
+
+成功した書き込みごとに、対象キーの `VersionEntry` が追加されます。
+
+```cpp
+db->put(bytes("profile:1"), bytes("v1"));
+db->put(bytes("profile:1"), bytes("v2"));
+db->remove(bytes("profile:1"));
+
+auto history = db->history(bytes("profile:1"));
+for (const auto& entry : history) {
+    const uint64_t seq = entry.seq;
+    const uint64_t sourceNodeId = entry.sourceNodeId;
+    const uint64_t timestampNs = entry.timestampNs;
+    const uint8_t flags = entry.flags;
+}
+```
+
+`history(key)` は、シーケンス番号順の履歴を返します。VersionLog が無効な場合、またはそのキーに履歴がない場合は、空の vector を返します。
+
+### VersionEntry を読む
+
+`VersionEntry` は、そのキーに append されたエンジンレベルの record です。
+
+| フィールド | 意味 |
+|---|---|
+| `seq` | mutation の単調増加するエンジンシーケンス番号です。`getAt()` や rollback API の入力に使います。 |
+| `sourceNodeId` | mutation の発生元です。ローカル書き込み、replica から適用された書き込み、rollback write を区別できます。 |
+| `timestampNs` | エンジンが記録した append 時刻です。診断には使えますが、履歴の順序は `seq` が基準です。 |
+| `flags` | storage flag です。tombstone は削除、blob は blob reference、rollback は rollback 由来の書き込みを表します。 |
+| `value` | 保存された bytes です。通常 record では inline value、blob flag が立つ場合は blob reference です。 |
+
+安定した履歴カーソルとして扱うべきなのは `seq` です。wall-clock time はメタデータで、`getAt()` の解決には使われません。
+
+### 指定シーケンス時点で読む
+
+`getAt(key, seq)` は、`seq` 以下で最後に記録された履歴値を返します。
+
+```cpp
+db->put(bytes("profile:1"), bytes("v1"));
+auto h1 = db->history(bytes("profile:1"));
+
+db->put(bytes("profile:1"), bytes("v2"));
+
+auto previous = db->getAt(bytes("profile:1"), h1.front().seq);
+if (previous) {
+    // previous == "v1"
+}
+```
+
+該当する履歴エントリが tombstone の場合、`getAt()` は `std::nullopt` を返します。VersionLog が無効な場合も `std::nullopt` です。
+
+### API の挙動
+
+| API | VersionLog 無効 | キーがない、または見える値がない | close 後 |
+|---|---|---|---|
+| `history(key)` | 空の vector | 空の vector | throw |
+| `getAt(key, seq)` | `std::nullopt` | `std::nullopt` | throw |
+| `rollbackKey(key, seq)` | throw | 古い値がなければ tombstone を書く | throw |
+| `rollbackTo(seq)` | throw | すでに対象シーケンス以前のキーは対象外 | throw |
+
+rollback API は書き込み API です。新しいシーケンス番号を確保し、WAL と VersionLog に record を追加し、MemTable を更新し、Cluster が有効ならレプリケーション実行層にも送ります。
+
+### 1 つのキーを戻す
+
+`rollbackKey(key, targetSeq)` は、指定キーを `targetSeq` 時点の状態へ戻す新しいレコードを書き込みます。
+
+```cpp
+auto history = db->history(bytes("profile:1"));
+if (!history.empty()) {
+    db->rollbackKey(bytes("profile:1"), history.front().seq);
+}
+```
+
+ロールバックは履歴ファイルの破壊的な書き換えではありません。新しいエンジン mutation を追加し、その VersionLog エントリに rollback flag を付け、過去の履歴は残します。
+
+### 変更されたキーをまとめて戻す
+
+`rollbackTo(targetSeq)` は VersionLog のインデックスを走査し、最新バージョンが `targetSeq` より新しいキーをすべて戻します。
+
+```cpp
+db->rollbackTo(checkpointSeq);
+```
+
+この操作は慎重に扱うべきです。対象キーごとに新しい書き込みが発生し、cluster mode ではそれらの rollback write がレプリケーション実行層にも送られます。
+
+### ロールバック前の確認
+
+アプリケーションコードで rollback を使う場合は、戻したい target sequence を明示し、変更対象のキーとは別の場所に保持しておくのが安全です。
+
+```cpp
+const auto beforeUpdate = db->history(bytes("profile:1"));
+const uint64_t restoreSeq = beforeUpdate.empty() ? 0 : beforeUpdate.back().seq;
+
+db->put(bytes("profile:1"), bytes("candidate"));
+
+if (!validateProfile()) {
+    db->rollbackKey(bytes("profile:1"), restoreSeq);
+}
+```
+
+`restoreSeq` がそのキーの最初の既知バージョンより前を指す場合、rollback は tombstone を書きます。新しく作ったキーを取り消すには便利ですが、意図した挙動か確認して使います。
+
+### 同期モードを選ぶ
+
+| モード | 挙動 | 主な用途 |
+|---|---|---|
+| `SYNC` | 各 VersionLog エントリを書き込み、永続化同期してから返ります。 | 履歴の永続性を最優先する場合。書き込みスループットは落ちます。 |
+| `ASYNC` | メモリ上の履歴は即時更新し、ファイルへの書き込みはバックグラウンドワーカーで行います。 | 小さな履歴永続化ウィンドウを許容してスループットを優先する場合。 |
+| `BATCHED_SYNC` | バックグラウンドワーカーでグループ化し、バッチ単位で永続化同期します。 | 1 書き込み 1 sync を避けつつ、履歴の永続性も重視する場合。 |
+
+`groupN`、`groupMicros`、`groupBytes` は非同期バッチをフラッシュする条件です。`asyncMaxPendingBytes` は未処理の履歴ログバイト数を制限し、必要に応じて書き込み側にバックプレッシャーをかけます。
+
+### 永続性の考え方
+
+VersionLog と WAL は別コンポーネントです。latest value の経路が durable でも、すべての履歴エントリが VersionLog 側の sync boundary を越えているとは限りません。
+
+| モード | メモリ上の見え方 | ファイル書き込み | 永続化境界 |
+|---|---|---|---|
+| `SYNC` | 呼び出しが返る前に更新されます。 | 呼び出しが返る前に書かれます。 | entry ごとに sync されます。 |
+| `ASYNC` | 呼び出しが返る前に更新されます。 | background worker に queue されます。 | `forceSync()` または worker flush です。クラッシュ時に直近履歴を失う可能性があります。 |
+| `BATCHED_SYNC` | 呼び出しが返る前に更新されます。 | grouped worker flush に queue されます。 | batch sync です。クラッシュウィンドウは grouping 条件に依存します。 |
+
+ユーザー向けの rollback 保証に履歴を使う場合は、`SYNC` または `BATCHED_SYNC` を選び、明示的な checkpoint で `forceSync()` を呼ぶ方針が扱いやすいです。
+
+### sync と close
+
+`AkkEngine::forceSync()` は、WAL と VersionLog が有効な場合に両方を同期します。
+
+```cpp
+db->forceSync();
+db->close();
+```
+
+`close()` は VersionLog のバックグラウンドワーカーを止め、ファイルをフラッシュし、非同期書き込みで発生していたエラーがあれば表面化させます。
