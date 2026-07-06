@@ -1,0 +1,460 @@
+---
+title: High-Level API Usage
+description: How to use AkkaraDB, PackedTable, indexes, refs, joins, and schema hooks from Kotlin.
+---
+
+Use this page when you want to store Kotlin data classes without handling binary key/value buffers directly.
+
+## Project Setup
+
+The high-level API lives in the JVM/Kotlin package:
+
+```kotlin
+import dev.swiftstorm.akkaradb.engine.AkkaraDB
+import dev.swiftstorm.akkaradb.engine.PackedTable
+```
+
+In a Gradle project, the AkkaraDB Gradle plugin is the intended setup path. It adds the runtime dependency, wires the compiler plugin for query DSL rewriting, and registers tasks that download the matching native/JNI libraries.
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    id("dev.swiftstorm.akkaradb")
+}
+
+dependencies {
+    akkara("version")
+}
+```
+
+The plugin also provides:
+
+| Task / property | Purpose |
+|---|---|
+| `akkaraDownloadNative` | Downloads native and JNI libraries into the build directory. |
+| `akkaraListNativeReleases` | Lists available native release tags. |
+| `akkara.native.dir` | Runtime system property used by tests and application runs to locate native libraries. |
+| `akkaraNativePlatform` / `akkara.native.platform` | Overrides platform detection. Supported values are currently `windows` and `linux`. |
+| `akkaraCompilerVersion` / `akkara.compiler.version` | Selects a compiler plugin version, useful for local builds. |
+
+If you do not use the Gradle plugin, you must make sure the AkkaraDB JVM artifact, compiler plugin, JNI library, and native engine library are all version-compatible and visible to the JVM process.
+
+## Open A Database
+
+`AkkaraDB.open()` wraps `AkkEngine.open()` and closes the engine when the database is closed.
+
+```kotlin
+import dev.swiftstorm.akkaradb.engine.AkkaraDB
+
+data class User(
+    val id: Long,
+    val name: String,
+    val age: Int
+)
+
+AkkaraDB.open("data/app").use { db ->
+    val users = db.table<User, Long>("users") { it.id }
+
+    users.put(User(1L, "Alice", 30))
+    println(users.get(1L))
+}
+```
+
+You can also open with `StartupMode` or `AkkaraOptions` when you need the same options available to the lower-level engine.
+
+```kotlin
+val db = AkkaraDB.open(options)
+```
+
+## Lifecycle
+
+`AkkaraDB` implements `Closeable`. Prefer `use { ... }` for short-lived tools and tests.
+
+```kotlin
+AkkaraDB.open("data/app").use { db ->
+    val users = db.table<User, Long>("users") { it.id }
+    users.put(User(1L, "Alice", 30))
+}
+```
+
+For a long-lived service, keep one `AkkaraDB` instance per database directory and close it during service shutdown. `PackedTable` also has a native table handle, but in normal application code it is usually owned by the database lifetime.
+
+## Define A Table
+
+`table<T, ID>()` needs a table name and a primary-key extractor.
+
+```kotlin
+val users = db.table<User, Long>("users") { user -> user.id }
+```
+
+The entity type is serialized through BinPack. The schema sent to the native table layer is built from the primary constructor of the Kotlin data class.
+
+Supported schema field types include:
+
+| Field shape | Notes |
+|---|---|
+| `Boolean`, integer types, `Float`, `Double`, `String` | Stored directly through the schema serializer and BinPack. |
+| `List<T>` and `Map<K, V>` | Element, key, and value types must also be supported. |
+| Nullable fields | Encoded as nullable descriptors. |
+| Nested data classes | Supported when the nested type is a Kotlin data class. |
+| Custom mapped/backed types | Supported when registered with BinPack. |
+
+Entity classes need a primary constructor. Unsupported field types fail during table creation.
+
+### Entity Design Checklist
+
+| Decision | Recommendation |
+|---|---|
+| Primary key field | Keep it stable and deterministic. Use `updatePrimaryKey()` when it must change. |
+| Mutable entity classes | Supported, but immutable data classes make update hooks and validation easier to reason about. |
+| Table name | Treat it as persistent storage layout. Renaming a table changes the key namespace. |
+| Nullable relation fields | Required when using `SetNull` foreign-key actions. |
+| Large values | Still use the underlying engine blob path when configured; the table layer encodes the entity as one value. |
+
+## Put, Get, Remove, Exists
+
+`PackedTable` stores each entity under a namespaced table prefix plus an encoded primary key.
+
+```kotlin
+users.put(User(1L, "Alice", 30))
+
+val alice: User? = users.get(1L)
+val exists: Boolean = users.exists(1L)
+
+users.remove(1L)
+```
+
+`put()` is an upsert by primary key. If a row already exists, update hooks run before the new value is written.
+
+### Core Method Reference
+
+| Method | Return | Notes |
+|---|---|---|
+| `put(entity)` | `Unit` | Inserts or replaces by the extracted primary key. |
+| `get(pk)` | `T?` | Returns `null` when the primary key is missing. |
+| `exists(pk)` | `Boolean` | Checks the table row key. |
+| `remove(pk)` | `Unit` | Removes the row, native index entries, custom index entries, and row-id mapping. |
+| `upsert(pk) { current -> next }` | `T` | Reads current value, writes the returned entity, and requires the primary key to match `pk`. |
+| `updatePrimaryKey(oldPk, entity)` | `Unit` | Moves a row to a new primary key while keeping the internal row id. |
+| `getAt(pk, seq)` | `T?` | Reads a historical value when VersionLog is enabled. |
+| `history(pk)` | `List<VersionEntry>` | Returns VersionLog entries for the underlying table key. |
+| `rowIdOf(pk)` | `Long?` | Returns the stable internal row id for a primary key. |
+| `primaryKeyOf(rowId)` | `ID?` | Resolves a row id back to the current primary key. |
+| `getByRowId(rowId)` | `T?` | Resolves a row id and then reads the current entity. |
+| `ref(pk)` | `AkkRef<T>?` | Creates a row-id reference when the row exists. |
+
+## Upsert
+
+Use `upsert()` when the update logic depends on the current value.
+
+```kotlin
+val updated = users.upsert(1L) { current ->
+    val base = current ?: User(1L, "Alice", 0)
+    base.copy(age = base.age + 1)
+}
+```
+
+The returned entity has the requested primary key. The update function must not return an entity with a different primary key.
+
+## Update The Primary Key
+
+`put()` does not allow update hooks to change the primary key. Use `updatePrimaryKey()` when the row identity itself needs to move.
+
+```kotlin
+users.updatePrimaryKey(
+    oldPk = 1L,
+    entity = User(10L, "Alice Cooper", 31)
+)
+```
+
+The row keeps its internal row id. This matters for `AkkRef`, because references point to row ids, not to the visible primary-key bytes.
+
+## Scan And Count
+
+`scan()` returns primary-key/value pairs. `scanAll()` returns values only.
+
+```kotlin
+val entries = users.scan().toList()
+val values = users.scanAll().toList()
+val total = users.count()
+```
+
+Range scans use primary-key order:
+
+```kotlin
+val page = users.scan(startPk = 100L, endPk = 200L).toList()
+val pageValues = users.scanValues(100L, 200L).toList()
+```
+
+Numeric primary keys are encoded in sortable order, so negative and positive numeric keys scan in their natural order.
+
+### Scan Method Reference
+
+| Method | Return | Notes |
+|---|---|---|
+| `scan()` | `AkkSequence<TableEntry<ID, T>>` | Scans the full table range. |
+| `scan(startPk, endPk)` | `AkkSequence<TableEntry<ID, T>>` | Scans a primary-key range. `null` means open start or end. |
+| `scanAll()` | `AkkSequence<T>` | Full table value scan. |
+| `scanValues(startPk, endPk)` | `AkkSequence<T>` | Range value scan. |
+| `count()` | `Long` | Counts rows in the table range. |
+| `count(startPk, endPk)` | `Long` | Counts rows in a primary-key range. |
+
+`AkkSequence` is lazy and cursor-backed. Use terminal operations such as `toList()`, `firstOrNull()`, `count()`, or `forEach()` to consume it. If you expose it from a function, document that it opens storage cursors when consumed.
+
+## Use Secondary Indexes
+
+Register indexes before writing data that should appear in the index.
+
+```kotlin
+val users = db.table<User, Long>("users") { it.id }
+users.index<String>("name")
+
+users.put(User(1L, "Alice", 30))
+users.put(User(2L, "Bob", 25))
+
+val alices = users.findBy("name", "Alice").toList()
+```
+
+Native field indexes are queryable and can be used by indexed query planning. Custom indexes are maintained by Kotlin-side hooks and support `find()`, but they are not used as native query indexes.
+
+```kotlin
+users.index("nameLower") { user: User -> user.name.lowercase() }
+
+val result = users.findBy("nameLower", "alice").toList()
+```
+
+Indexes are not automatically backfilled. If you register an index after rows already exist, rewrite or reinsert those rows, or rebuild the table, before relying on `findBy()` for existing data.
+
+## Query
+
+The ergonomic `query { ... }`, `exists { ... }`, `firstOrNull { ... }`, `runToList { ... }`, and `count { ... }` entry points are compiler-plugin targets. Without the AkkaraDB compiler plugin, they throw at runtime.
+
+Use `runQ()` when you already have an `AkkQuery` AST.
+
+```kotlin
+val seq = users.runQ(query)
+val list = seq.toList()
+```
+
+`runQ()` tries to plan an equality probe against a registered native field index. If it cannot, it falls back to a native query scan over the table prefix.
+
+### Query Planning Notes
+
+The native index fast path is currently equality-oriented. A query such as `name == "Alice" && age >= 18` can use the `name` index if that index is registered and queryable, then apply the remaining predicate during the query scan. Queries without an indexed equality probe scan the table key range.
+
+The Kotlin lambda form is designed for application code, but the actual query sent to native code is a serialized AST. That means unsupported Kotlin expressions are a compiler-plugin concern, not a runtime reflection feature.
+
+### Query DSL Support
+
+The compiler plugin rewrites calls on `PackedTable`:
+
+| Source call | Rewritten shape |
+|---|---|
+| `query { predicate }` | Builds an `AkkQuery`. |
+| `exists { predicate }` | `runQ(query).any()`. |
+| `firstOrNull { predicate }` | `runQ(query).firstOrNull()`. |
+| `runToList { predicate }` | `runQ(query).toList()`. |
+| `count { predicate }` | `runQ(query).count()`. |
+
+Supported predicate shapes include field access, nested field access, captured values, literals, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, null checks, `in`, `!in`, map indexing, `String.startsWith()`, `String.contains()`, and `like()`.
+
+Expressions the plugin cannot translate are captured as values. That is useful for constants, but it does not make arbitrary Kotlin code executable inside the native query engine.
+
+## Coroutines And Flow
+
+`AkkSequence` can be converted to a `Flow`, and the coroutine extension package provides async wrappers for table operations.
+
+```kotlin
+import kotlinx.coroutines.Dispatchers
+
+val flow = users.scanAllFlow(Dispatchers.IO)
+val byName = users.findByFlow("name", "Alice")
+
+val user = users.getAsync(1L)
+users.putAsync(User(2L, "Bob", 25))
+```
+
+These helpers move blocking engine work onto the dispatcher you provide. They do not turn the native engine into a non-blocking storage engine; choose a dispatcher appropriate for blocking I/O.
+
+### Coroutine Method Reference
+
+| Helper | Notes |
+|---|---|
+| `scanAllFlow()`, `scanFlow()`, `scanValuesFlow()` | Flow wrappers around scan methods. |
+| `runQFlow(query)`, `findByFlow(fieldName, value)` | Flow wrappers around query/index reads. |
+| `putAsync(entity)`, `getAsync(pk)`, `removeAsync(pk)` | Dispatcher-wrapped basic operations. |
+| `existsAsync(pk)`, `countAsync()` | Dispatcher-wrapped checks and counts. |
+| `rowIdOfAsync(pk)`, `primaryKeyOfAsync(rowId)`, `getByRowIdAsync(rowId)` | Dispatcher-wrapped row-id helpers. |
+| `getAtAsync(pk, seq)`, `historyAsync(pk)` | Dispatcher-wrapped VersionLog helpers. |
+| `updatePrimaryKeyAsync(oldPk, entity)`, `upsertAsync(pk) { ... }` | Dispatcher-wrapped mutation helpers. |
+
+## Update Hooks
+
+`onUpdate()` lets a table normalize or validate replacement entities.
+
+```kotlin
+users.onUpdate { old, next ->
+    next.copy(
+        name = next.name.trim(),
+        age = next.age.coerceAtLeast(0)
+    )
+}
+```
+
+For field-specific transforms:
+
+```kotlin
+users.onUpdateField(User::name) { _, next ->
+    next.trim()
+}
+```
+
+Hooks run when an existing row is replaced or when `updatePrimaryKey()` transforms the replacement entity.
+
+## Row Id References
+
+`AkkRef<T>` points at the internal row id for an entry. It survives primary-key changes because `updatePrimaryKey()` rewrites the primary-key mapping while keeping the row id.
+
+```kotlin
+data class Author(val id: Long, val name: String)
+data class Post(val id: Long, val author: AkkRef<Author>, val title: String)
+
+val authors = db.table<Author, Long>("authors") { it.id }
+val posts = db.table<Post, Long>("posts") { it.id }
+
+authors.put(Author(1L, "Alice"))
+val authorRef = authors.ref(1L) ?: error("author missing")
+posts.put(Post(100L, authorRef, "hello"))
+
+authors.updatePrimaryKey(1L, Author(10L, "Alice Cooper"))
+
+val post = posts.get(100L)!!
+val author = post.author.get(authors)
+```
+
+An attached ref can cache and flush a replacement value:
+
+```kotlin
+val ref = authors.ref(10L)!!.attach(authors)
+ref.replace(Author(10L, "Alice Updated")).flush()
+```
+
+## Joins
+
+Joins are Kotlin-level views over table scans and lookups.
+
+```kotlin
+val joined = posts.joinRef(authors) { it.author }
+    .where { post, author -> author.name.startsWith("Alice") }
+    .toList()
+```
+
+Primary-key joins are also available:
+
+```kotlin
+val joined = posts.join(authors) { post -> post.authorId }.toList()
+```
+
+For arbitrary key functions, both sides can provide a key extractor. This form scans the right table for each left row, so use it for small datasets or tooling flows.
+
+## Schema And Foreign Keys
+
+`AkkaraSchema` registers tables and installs hook-based foreign-key checks.
+
+```kotlin
+val schema = db.schema()
+val authors = schema.table<Author, Long>("authors") { it.id }
+val posts = schema.table<PlainPost, Long>("posts") { it.id }
+
+schema.foreignKey(
+    source = posts,
+    sourceField = PlainPost::authorId,
+    target = authors,
+    onDelete = OnDelete.Restrict,
+    onUpdate = OnUpdate.Cascade
+).open()
+```
+
+Supported actions are:
+
+| Action | On delete | On update |
+|---|---|---|
+| `Restrict` | Rejects deleting a referenced target. | Rejects changing a referenced primary key. |
+| `Cascade` | Removes referencing source rows. | Updates source fields to the new target key. |
+| `SetNull` | Sets nullable source fields to `null`. | Sets nullable source fields to `null`. |
+
+`SetNull` requires the source field to be nullable. Foreign-key checks are implemented with hooks and scans, not with a native constraint engine.
+
+### Foreign Key Cost
+
+Foreign-key actions scan the source table to find referencing rows. This is fine for small tables, tests, admin tools, and simple embedded applications. For large tables, model the relation with an explicit secondary index or add an application-level lookup table so you can find referencing rows without scanning everything.
+
+### Foreign Key Behavior
+
+| Event | `Restrict` | `Cascade` | `SetNull` |
+|---|---|---|---|
+| Source `put()` references missing target | Fails for all modes. | Fails for all modes. | Fails for all modes unless the source value is already `null`. |
+| Target `remove()` | Fails if source rows reference it. | Removes referencing source rows. | Sets nullable source field to `null`. |
+| Target primary-key update | Fails if source rows reference it. | Rewrites source fields to the new primary key. | Sets nullable source field to `null`. |
+| Source field is `AkkRef<T>` | Uses target row id. | Delete actions work through row id. | Update actions do not rewrite refs because refs already follow row id. |
+
+## Versioned Reads
+
+When VersionLog is enabled in the underlying engine, `PackedTable` can read a row at an older sequence and return version history.
+
+```kotlin
+val old = users.getAt(1L, targetSeq)
+val history = users.history(1L)
+db.rollbackTo(targetSeq)
+```
+
+The table layer maps the typed primary key to the underlying engine key before calling VersionLog APIs.
+
+## Common Failure Modes
+
+| Symptom | Likely cause |
+|---|---|
+| `query { ... }` throws at runtime | The AkkaraDB compiler plugin was not applied. |
+| `findBy()` misses old rows | The index was registered after those rows were written and was not backfilled. |
+| `SetNull` fails during schema setup | The source field is not nullable. |
+| `AkkRef` cannot resolve | The referenced row was removed, or the ref is detached and no table was provided. |
+| A renamed table appears empty | Table name is part of the key namespace. |
+| Native library cannot load | The JVM cannot find compatible JNI/native libraries via plugin setup or `akkara.native.dir`. |
+
+## Practical Starting Point
+
+For a first application, keep the shape simple:
+
+1. Use immutable Kotlin data classes.
+2. Open one `AkkaraDB` per database directory.
+3. Register all indexes immediately after opening tables.
+4. Keep query DSL calls behind the Gradle/compiler plugin setup.
+5. Use `AkkRef` when you need references that survive primary-key updates.
+6. Treat foreign-key hooks as embedded-application helpers, not as a distributed constraint system.
+
+## Migration Checklist
+
+Use this checklist when changing a typed model after data exists:
+
+| Change | Recommended handling |
+|---|---|
+| Rename a table | Treat it as a data migration because the namespace prefix changes. |
+| Add an index | Register it, scan existing rows, re-put rows or run a rebuild, then enable indexed reads. |
+| Change primary-key type | Create a new table or run a controlled rewrite; encoded key order and bytes change. |
+| Rename a data-class constructor field | Treat it as a schema/data compatibility change. Query scans refer to field names. |
+| Add a nullable field | Usually easiest when BinPack/schema compatibility for the old data is explicitly handled. |
+| Change relation semantics | Re-register schema hooks and verify existing rows before serving writes. |
+| Enable VersionLog later | New history starts when the underlying engine begins recording versions. |
+
+For large data sets, prefer an offline migration or a controlled dual-write/rebuild phase. The high-level API does not include an online schema migration coordinator.
+
+## Production Checklist
+
+Before shipping a high-level API deployment:
+
+1. Pin compatible versions of the JVM artifact, compiler plugin, JNI library, and native library.
+2. Run startup checks that open all tables and register indexes before serving traffic.
+3. Keep database directories, table metadata keys, and native identity/config files in the same backup plan.
+4. Decide whether query DSL calls are allowed without the compiler plugin in test/runtime profiles.
+5. Document which foreign-key hooks are correctness-critical and which are convenience checks.
+6. Exercise restore from backup, especially when `AkkRef`, custom indexes, or VersionLog are used.

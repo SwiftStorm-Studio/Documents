@@ -1,0 +1,28 @@
+---
+title: High-Level API
+description: Typed Kotlin API built on top of AkkEngine and PackedTable.
+---
+
+The high-level API is the typed Kotlin/JVM layer over AkkEngine. It lets application code work with Kotlin data classes through `AkkaraDB`, `PackedTable`, secondary indexes, row-id references, joins, and schema hooks instead of manually building byte keys and byte values.
+
+Use it when your application wants a table-like API and stable Kotlin types. Use the low-level `AkkEngine` API when you need direct binary key layout control, custom protocols, native C++ integration, or engine internals.
+
+## Read By Goal
+
+| Goal | Page |
+|---|---|
+| Open a database, define tables, and perform typed operations | [High-Level API Usage](/akkaradb-native/api/high-level/usage/) |
+| Understand how tables, keys, indexes, refs, and schema hooks map onto AkkEngine | [High-Level API Architecture](/akkaradb-native/api/high-level/architecture/) |
+
+## Main Types
+
+| Type | Role |
+|---|---|
+| `AkkaraDB` | Owns an `AkkEngine` handle and opens typed tables. |
+| `PackedTable<T, ID>` | Stores Kotlin entities by primary key and exposes typed CRUD, scan, query, index, and reference helpers. |
+| `AkkSequence<T>` | Lazy cursor-backed sequence returned by scans, indexes, queries, and joins. |
+| `AkkRef<T>` | Stable row-id reference to another table entry. |
+| `AkkaraSchema` | Registers tables and foreign-key style hooks. |
+
+This layer is still backed by AkkEngine. Durability, VersionLog, compaction, blobs, and server/cluster behavior are controlled by the underlying engine options.
+

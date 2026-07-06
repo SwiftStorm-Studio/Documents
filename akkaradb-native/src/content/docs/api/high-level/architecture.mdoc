@@ -1,0 +1,318 @@
+---
+title: High-Level API Architecture
+description: How AkkaraDB and PackedTable map typed Kotlin data to AkkEngine storage.
+---
+
+The high-level API is a Kotlin/JVM facade over AkkEngine. It keeps application code typed, but the storage path is still the byte-oriented engine described in the low-level API docs.
+
+## Runtime Parts
+
+| Part | Responsibility |
+|---|---|
+| `AkkaraDB` | Owns an `AkkEngine` instance and opens `PackedTable` handles. |
+| `PackedTable<T, ID>` | Maps table name, primary key, entity bytes, indexes, row-id metadata, and query scans to engine operations. |
+| `SchemaSerializer` | Serializes the Kotlin data-class constructor schema and sends it to the native table layer. |
+| `BinPack` | Encodes and decodes entity values, keys, refs, and custom mapped types. |
+| `AkkSequence<T>` | Wraps native or Kotlin cursors and closes them after terminal operations. |
+| `AkkaraSchema` | Adds hook-based referential actions across tables. |
+
+`PackedTable` is currently implemented by `JNIPackedTable`. The table opens a native table handle using the engine handle, table prefix, and serialized schema bytes.
+
+## Layering
+
+The high-level API is a client-side convenience layer. It does not replace the storage engine, API server, cluster runtime, or VersionLog.
+
+| Layer | What happens there |
+|---|---|
+| Kotlin application | Calls `AkkaraDB`, `PackedTable`, query helpers, refs, and schema hooks. |
+| JVM binding | Encodes entities and keys, manages table handles, and calls JNI. |
+| Native table layer | Applies indexed put/remove and native query scans using schema bytes. |
+| `AkkEngine` | Stores byte keys and byte values, handles WAL, memtable, SST, blob, VersionLog, and configured runtime components. |
+
+This is why high-level tables inherit the same durability and performance characteristics as the underlying engine configuration.
+
+## Table Namespace
+
+Each table name is hashed into an 8-byte namespace prefix. Table rows are stored under:
+
+```text
+[tablePrefix][encodedPrimaryKey]
+```
+
+The same engine can therefore hold multiple typed tables, indexes, and metadata keys in one key space.
+
+| Namespace | Purpose |
+|---|---|
+| `tableName` | Entity rows. |
+| `tableName:idx:<field>` | Secondary index entries. |
+| `tableName:sys:pk2row` | Primary-key to row-id mapping. |
+| `tableName:sys:row2pk` | Row-id to primary-key mapping. |
+| `tableName:sys:nextrow` | Next row-id counter. |
+
+The namespace hash is deterministic for a table name. Renaming a table changes the prefix and therefore points at a different key range.
+
+### Metadata Ownership
+
+`PackedTable` writes its metadata into the same engine namespace as user data. The metadata keys are internal to the table implementation.
+
+| Metadata | Required for |
+|---|---|
+| `pk2row` | Resolving a primary key to a stable row id. |
+| `row2pk` | Resolving an `AkkRef` back to the current primary key. |
+| `nextrow` | Allocating new row ids. |
+| Custom index keys | Finding entries through custom Kotlin extractors. |
+
+Backup, snapshot, and migration tooling must keep these keys together with table rows.
+
+## Primary Key Encoding
+
+Numeric primary keys are encoded into sortable bytes:
+
+| Kotlin type | Encoding shape |
+|---|---|
+| `Byte` | One byte with sign bit flipped. |
+| `Short` | Big-endian sortable unsigned bytes after sign flip. |
+| `Int` | Big-endian sortable unsigned bytes after sign flip. |
+| `Long` | Big-endian sortable unsigned bytes after sign flip. |
+| Other supported types | BinPack encoding. |
+
+This lets numeric range scans use engine key order while preserving natural numeric order.
+
+## Entity Schema
+
+`SchemaSerializer` reads the primary constructor of the Kotlin data class. It writes a compact descriptor with field count, field name, and type descriptor for each constructor parameter.
+
+Supported descriptors include scalar types, strings, lists, maps, nested structs, nullable fields, and custom BinPack aliases. A class without a primary constructor, or a field whose type cannot be described, fails when the table is opened.
+
+The native table layer receives the schema bytes when `PackedTable` opens. Query scans use the same schema bytes to evaluate serialized query ASTs against stored row values.
+
+## Write Path
+
+`put(entity)` follows this shape:
+
+1. Extract the primary key.
+2. Encode the primary key and build the engine key.
+3. Allocate or load the row id for that primary key.
+4. Load the previous entity if it exists.
+5. Run update transforms for replacements.
+6. Remove stale custom index entries.
+7. Write the entity through the native indexed put path.
+8. Rebuild custom index entries.
+9. Write primary-key and row-id mappings.
+
+Native field indexes are maintained by the native table path. Custom indexes are maintained in Kotlin by removing and adding index keys around the row write.
+
+### Update Hooks And Immutability
+
+Replacement writes run update transform hooks before the final entity is encoded. After hooks run, the table validates that immutable fields did not change unexpectedly. If the primary key needs to change, `updatePrimaryKey()` is the explicit path.
+
+This keeps accidental primary-key movement out of ordinary `put()` calls and makes `AkkRef` behavior easier to preserve.
+
+## Read And Scan Path
+
+`get(pk)` encodes the typed primary key, builds the namespaced engine key, reads bytes from the engine, and decodes the entity with BinPack.
+
+`scan()` scans the `[tablePrefix, nextPrefix(tablePrefix))` range and decodes both the primary-key suffix and the entity bytes. `scanAll()` skips the primary-key decode and returns values only.
+
+`AkkSequence` keeps scans lazy. Terminal operations such as `toList()`, `firstOrNull()`, `count()`, and `forEach()` open a cursor, consume it, and close it in a `finally` block.
+
+## Secondary Indexes
+
+There are two index paths:
+
+| Index type | Created by | Queryable by native query planner | Maintenance |
+|---|---|---|---|
+| Native field index | `index<F>("fieldName")` | Yes | Native table path. |
+| Custom index | `index("name") { entity -> value }` | No | Kotlin-side custom index keys. |
+
+`findBy()` first asks a registered index. If there is no registered index, it builds an equality query and calls `runQ()`.
+
+`runQ()` checks whether the query contains an equality probe on a registered queryable field index. If so, it opens an index query scan. Otherwise it opens a query scan over the table key range.
+
+### Backfill Boundary
+
+Index registration does not scan existing table rows. The implementation registers native index metadata or creates a custom index object for future writes. Existing rows only become visible to a newly registered index after they are rewritten or explicitly rebuilt.
+
+For production data, treat index creation as a migration step:
+
+1. Register the index.
+2. Scan existing rows.
+3. Re-put each row or run a dedicated rebuild path.
+4. Start serving indexed reads after the rebuild completes.
+
+## Query DSL Boundary
+
+The functions that take Kotlin lambdas marked with `@AkkQueryDsl` are not interpreted at runtime. They are placeholders for the AkkaraDB compiler plugin.
+
+Without the compiler plugin, these calls throw:
+
+```kotlin
+users.query { age >= 18 }
+users.firstOrNull { name == "Alice" }
+users.runToList { age > 30 }
+```
+
+The plugin rewrites those calls to `runQ()` with a serialized query AST. Code that constructs `AkkQuery` manually can call `runQ()` directly.
+
+### Rewritten Expression Model
+
+The compiler plugin lowers supported Kotlin expressions into the query AST:
+
+| Kotlin expression | AST operation |
+|---|---|
+| `field == value` | `EQ` |
+| `field != value` | `NEQ` |
+| `<`, `<=`, `>`, `>=` | `LT`, `LE`, `GT`, `GE` |
+| `a && b`, `a || b` | `AND`, `OR` |
+| `!expr` | `NOT` |
+| `field == null`, `field != null` | `IS_NULL`, `IS_NOT_NULL` |
+| `x in values`, `x !in values` | `IN`, `NOT_IN` |
+| `map["key"]` | `MAP_GET` |
+| `string.startsWith(prefix)` | `STARTS_WITH` |
+| `string.contains(part)` | `CONTAINS` |
+| `string.like(pattern)` | `LIKE` |
+
+Field access is resolved to field names, including nested paths such as `address.city`. Outer variables become captures in the query object.
+
+### Planning Model
+
+The runtime planner looks for an equality probe on a queryable registered index. It can find that probe directly or inside an `AND`. The first usable equality probe becomes the index scan seed; the full query is still passed to the native query scan for final filtering.
+
+Queries with only range predicates, string predicates, `OR`, or unindexed equality fall back to scanning the table range. They are still correct, but they are not index-seeded.
+
+## Coroutine Boundary
+
+Coroutine helpers wrap synchronous storage calls with `withContext(dispatcher)` or expose cursor consumption as `Flow`.
+
+| Helper shape | Behavior |
+|---|---|
+| `getAsync`, `putAsync`, `removeAsync`, `upsertAsync` | Runs the synchronous operation on the provided dispatcher. |
+| `scanFlow`, `scanAllFlow`, `findByFlow`, `runQFlow` | Consumes the underlying `AkkSequence` and emits values as a `Flow`. |
+| `historyFlow` | Streams VersionLog entries through a Flow wrapper. |
+
+These helpers are useful for structured concurrency in Kotlin services, but native work is still blocking work underneath.
+
+## Consistency Model
+
+The high-level layer does not add a transaction manager above `AkkEngine`.
+
+| Operation | Atomicity boundary |
+|---|---|
+| Single engine `put` / `remove` | Uses the underlying engine write path. |
+| `PackedTable.put()` | Writes the entity and related table metadata/index entries as a sequence of engine operations. |
+| `updatePrimaryKey()` | Writes the new row, rewrites row-id metadata, then removes the old key. |
+| Foreign-key cascade/set-null | Applies hook-driven changes row by row. |
+| Join helpers | Read current table state through scans/lookups; no snapshot transaction is created by the join helper. |
+
+For application invariants that require multi-row atomicity, build an explicit coordination layer or keep the invariant inside one value where possible.
+
+## Performance Model
+
+| Path | Expected cost shape |
+|---|---|
+| `get(pk)` | One primary-key lookup plus decode. |
+| `put(entity)` | Entity write plus row-id metadata, native index work, and custom index maintenance. |
+| `findBy()` with native field index | Index scan plus decode. |
+| `runQ()` with index probe | Index-seeded query scan. |
+| `runQ()` without index probe | Table-range query scan. |
+| `join(right) { pk }` | Left scan plus right primary-key lookup per row. |
+| arbitrary-key join | Left scan times right scan. |
+| foreign-key action | Source-table scan to find referencing rows. |
+
+This makes index planning and schema-hook usage the main design levers at the high-level API layer.
+
+## Backup And Restore
+
+Backups must include all engine files and table metadata. For a typed table deployment, preserve:
+
+| Data | Why |
+|---|---|
+| Engine data files | Actual key/value rows, indexes, metadata, WAL/SST/blob state. |
+| `pk2row`, `row2pk`, `nextrow` metadata | Required for `AkkRef` and row-id operations. |
+| Custom index keys | Required for custom `findBy()` results. |
+| VersionLog files | Required for `getAt()`, `history()`, and rollback. |
+| Engine options/config used at restore | Determines whether VersionLog, blobs, cluster, and server components are enabled. |
+
+Restoring only visible table rows without metadata can make refs, custom indexes, and row-id operations inconsistent.
+
+## Row Id References
+
+`AkkRef<T>` stores an internal row id. `PackedTable` keeps a bidirectional mapping between primary keys and row ids.
+
+This makes references stable across primary-key updates:
+
+1. `ref(pk)` resolves the current row id for the primary key.
+2. `updatePrimaryKey(oldPk, entity)` writes the new row under the new primary key.
+3. The row-id mapping is rewritten from old key to new key.
+4. Existing `AkkRef(rowId)` values still resolve through `rowIdToPk`.
+
+The tradeoff is that row-id mappings are extra metadata rows in the same engine key space.
+
+## Joins
+
+Join helpers are Kotlin-level views. They do not currently install a native join plan.
+
+| Join form | Shape |
+|---|---|
+| `join(right) { left -> rightPk }` | Scans left and does primary-key lookups on right. |
+| `joinRef(right) { left -> ref }` | Scans left and resolves row-id refs on right. |
+| `join(right, leftKey, rightKey)` | Scans left and scans right for matching keys. |
+
+These helpers are useful for local app logic, tests, and tooling. For large cross-table joins, design explicit indexes or application-level query plans.
+
+## Schema Hooks
+
+`AkkaraSchema.foreignKey()` does not create a native constraint object. It registers hooks on source and target tables:
+
+| Hook | Purpose |
+|---|---|
+| Source before put | Validates that a referenced target exists. |
+| Target before remove | Applies `Restrict`, `Cascade`, or `SetNull` for deletes. |
+| Target before primary-key update | Enforces update restriction before a key changes. |
+| Target after primary-key update | Applies cascade or set-null updates after the new key exists. |
+
+The implementation scans the source table to find referencing rows. This is simple and predictable, but it is not a replacement for a native indexed constraint engine.
+
+## Test Coverage
+
+The integration tests currently cover the main high-level behavior:
+
+| Area | Covered behavior |
+|---|---|
+| Basic table operations | `put`, `get`, `remove`, reopen, and persistence through `AkkaraDB.open()`. |
+| Indexes | Native field index lookup, custom index lookup, and index updates on replacement writes. |
+| Query scans | `runQ()` filtering and indexed query planning. |
+| VersionLog bridge | `getAt()`, `history()`, and rollback through typed keys. |
+| Primary-key updates | Moving rows while keeping indexes and row-id mappings coherent. |
+| Upsert and hooks | Immutable-style updates and update transforms. |
+| References and joins | `AkkRef`, attached refs, `join()`, and `joinRef()`. |
+| Schema hooks | `Restrict`, `Cascade`, and `SetNull` behavior for delete/update. |
+
+The tests do not turn foreign keys into a native constraint engine, and they do not prove a distributed transaction model across server or cluster boundaries.
+
+## Boundaries
+
+Keep these boundaries explicit:
+
+- Table names are part of the physical key layout.
+- Register indexes before writing rows you expect to find through those indexes.
+- Compiler-plugin query calls are not runtime-interpreted lambdas.
+- Foreign keys are hook-based and scan source tables.
+- `AkkRef` depends on row-id metadata being kept with the table.
+- Concurrency and durability behavior still come from the underlying `AkkEngine`.
+- There is no online schema migration coordinator in the high-level layer.
+- There is no native join planner behind the Kotlin join helpers.
+- There is no multi-table transaction layer around schema hooks or cascade operations.
+
+## When To Drop Down
+
+Use the low-level API instead of the high-level API when:
+
+| Need | Better layer |
+|---|---|
+| Exact binary key layout | `AkkEngine` byte API. |
+| Custom network protocol | API server or direct engine integration. |
+| Cross-language typed storage | Define an explicit encoding/protocol above byte keys. |
+| Online cluster topology management | Cluster/control-plane layer. |
+| Native C++ embedding | `akkaradb::engine::AkkEngine`. |
+| Bulk migration tooling | Often low-level scans plus explicit decode/rewrite logic. |

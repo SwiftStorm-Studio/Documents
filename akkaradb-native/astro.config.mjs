@@ -31,6 +31,19 @@ export default defineConfig({
 					items: [
 						{ label: 'Overview', translations: { ja: '概要' }, slug: '' },
 						{
+							label: 'High-Level API',
+							translations: { ja: '高レベル API' },
+							items: [
+								{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/high-level' },
+								{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/high-level/usage' },
+								{
+									label: 'Architecture',
+									translations: { ja: 'アーキテクチャ' },
+									slug: 'api/high-level/architecture',
+								},
+							],
+						},
+						{
 							label: 'Low-Level API',
 							translations: { ja: '低レベル API' },
 							items: [

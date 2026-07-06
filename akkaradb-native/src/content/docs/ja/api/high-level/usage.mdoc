@@ -1,0 +1,460 @@
+---
+title: 高レベル API の使い方
+description: Kotlin から AkkaraDB、PackedTable、index、ref、join、schema hook を使う方法。
+---
+
+このページは、binary key/value buffer を直接扱わずに Kotlin data class を保存したい場合に読むページです。
+
+## project setup
+
+高レベル API は、JVM/Kotlin package にあります。
+
+```kotlin
+import dev.swiftstorm.akkaradb.engine.AkkaraDB
+import dev.swiftstorm.akkaradb.engine.PackedTable
+```
+
+Gradle project では、AkkaraDB Gradle plugin を使う構成が基本です。runtime dependency、query DSL rewrite 用 compiler plugin、対応する native/JNI library の download task をまとめて扱います。
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    id("dev.swiftstorm.akkaradb")
+}
+
+dependencies {
+    akkara("version")
+}
+```
+
+plugin は次の task / property も提供します。
+
+| task / property | 目的 |
+|---|---|
+| `akkaraDownloadNative` | native library と JNI library を build directory に download します。 |
+| `akkaraListNativeReleases` | 利用可能な native release tag を一覧します。 |
+| `akkara.native.dir` | test / application run 時に native library を探すための runtime system property。 |
+| `akkaraNativePlatform` / `akkara.native.platform` | platform detection を上書きします。現在の supported values は `windows` と `linux` です。 |
+| `akkaraCompilerVersion` / `akkara.compiler.version` | compiler plugin version を選びます。local build を使う場合に便利です。 |
+
+Gradle plugin を使わない場合は、AkkaraDB JVM artifact、compiler plugin、JNI library、native engine library の version compatibility と JVM process からの見え方を自分で揃える必要があります。
+
+## database を開く
+
+`AkkaraDB.open()` は `AkkEngine.open()` を wrap します。`AkkaraDB` を close すると、下にある engine も close されます。
+
+```kotlin
+import dev.swiftstorm.akkaradb.engine.AkkaraDB
+
+data class User(
+    val id: Long,
+    val name: String,
+    val age: Int
+)
+
+AkkaraDB.open("data/app").use { db ->
+    val users = db.table<User, Long>("users") { it.id }
+
+    users.put(User(1L, "Alice", 30))
+    println(users.get(1L))
+}
+```
+
+低レベル engine と同じ option が必要な場合は、`StartupMode` や `AkkaraOptions` でも開けます。
+
+```kotlin
+val db = AkkaraDB.open(options)
+```
+
+## lifecycle
+
+`AkkaraDB` は `Closeable` です。短命な tool や test では `use { ... }` を使うのが自然です。
+
+```kotlin
+AkkaraDB.open("data/app").use { db ->
+    val users = db.table<User, Long>("users") { it.id }
+    users.put(User(1L, "Alice", 30))
+}
+```
+
+long-lived service では、database directory ごとに 1 つの `AkkaraDB` instance を保持し、service shutdown 時に close します。`PackedTable` も native table handle を持ちますが、通常の application code では database lifetime にぶら下げて扱います。
+
+## table を定義する
+
+`table<T, ID>()` には、table name と primary-key extractor を渡します。
+
+```kotlin
+val users = db.table<User, Long>("users") { user -> user.id }
+```
+
+entity は BinPack で serialize されます。native table layer に渡される schema は、Kotlin data class の primary constructor から作られます。
+
+対応している schema field は次の通りです。
+
+| field shape | メモ |
+|---|---|
+| `Boolean`、integer types、`Float`、`Double`、`String` | schema serializer と BinPack で直接扱います。 |
+| `List<T>` と `Map<K, V>` | element、key、value type も対応型である必要があります。 |
+| nullable field | nullable descriptor として encode されます。 |
+| nested data class | nested type が Kotlin data class の場合に対応します。 |
+| custom mapped/backed type | BinPack に登録されている場合に対応します。 |
+
+entity class には primary constructor が必要です。対応できない field type がある場合は table creation 時に失敗します。
+
+### entity design checklist
+
+| 判断すること | 推奨 |
+|---|---|
+| primary key field | stable で deterministic にします。変更が必要な場合は `updatePrimaryKey()` を使います。 |
+| mutable entity class | 対応していますが、immutable data class の方が update hook と validation を追いやすいです。 |
+| table name | persistent storage layout として扱います。rename すると key namespace が変わります。 |
+| nullable relation field | `SetNull` foreign-key action を使う場合に必要です。 |
+| large value | table layer は entity 全体を 1 value として encode します。Blob の挙動は下の engine configuration に従います。 |
+
+## put / get / remove / exists
+
+`PackedTable` は、table namespace prefix と encoded primary key の下に entity を保存します。
+
+```kotlin
+users.put(User(1L, "Alice", 30))
+
+val alice: User? = users.get(1L)
+val exists: Boolean = users.exists(1L)
+
+users.remove(1L)
+```
+
+`put()` は primary key に対する upsert です。既存 row がある場合は、new value を書く前に update hook が走ります。
+
+### core method reference
+
+| method | return | メモ |
+|---|---|---|
+| `put(entity)` | `Unit` | extracted primary key で insert / replace します。 |
+| `get(pk)` | `T?` | primary key がなければ `null` を返します。 |
+| `exists(pk)` | `Boolean` | table row key を確認します。 |
+| `remove(pk)` | `Unit` | row、native index entry、custom index entry、row-id mapping を削除します。 |
+| `upsert(pk) { current -> next }` | `T` | current value を読み、返された entity を書きます。primary key は `pk` と一致する必要があります。 |
+| `updatePrimaryKey(oldPk, entity)` | `Unit` | internal row id を保ったまま row を new primary key へ移動します。 |
+| `getAt(pk, seq)` | `T?` | VersionLog 有効時に historical value を読みます。 |
+| `history(pk)` | `List<VersionEntry>` | underlying table key の VersionLog entries を返します。 |
+| `rowIdOf(pk)` | `Long?` | primary key に対応する stable internal row id を返します。 |
+| `primaryKeyOf(rowId)` | `ID?` | row id から現在の primary key を解決します。 |
+| `getByRowId(rowId)` | `T?` | row id を解決して current entity を読みます。 |
+| `ref(pk)` | `AkkRef<T>?` | row が存在する場合に row-id reference を作ります。 |
+
+## upsert
+
+現在の値を見て更新内容を決めたい場合は `upsert()` を使います。
+
+```kotlin
+val updated = users.upsert(1L) { current ->
+    val base = current ?: User(1L, "Alice", 0)
+    base.copy(age = base.age + 1)
+}
+```
+
+返す entity の primary key は、要求した primary key と一致している必要があります。
+
+## primary key を変更する
+
+`put()` の update hook では primary key を変えられません。row identity 自体を移動したい場合は `updatePrimaryKey()` を使います。
+
+```kotlin
+users.updatePrimaryKey(
+    oldPk = 1L,
+    entity = User(10L, "Alice Cooper", 31)
+)
+```
+
+内部 row id は維持されます。`AkkRef` は見えている primary-key bytes ではなく row id を指すため、これは重要です。
+
+## scan と count
+
+`scan()` は primary-key / value の pair を返します。`scanAll()` は value だけを返します。
+
+```kotlin
+val entries = users.scan().toList()
+val values = users.scanAll().toList()
+val total = users.count()
+```
+
+range scan は primary-key order を使います。
+
+```kotlin
+val page = users.scan(startPk = 100L, endPk = 200L).toList()
+val pageValues = users.scanValues(100L, 200L).toList()
+```
+
+numeric primary key は sortable order で encode されるため、negative / positive を含む numeric key も自然な順序で scan できます。
+
+### scan method reference
+
+| method | return | メモ |
+|---|---|---|
+| `scan()` | `AkkSequence<TableEntry<ID, T>>` | table 全体を scan します。 |
+| `scan(startPk, endPk)` | `AkkSequence<TableEntry<ID, T>>` | primary-key range を scan します。`null` は open start / end です。 |
+| `scanAll()` | `AkkSequence<T>` | table 全体の value scan です。 |
+| `scanValues(startPk, endPk)` | `AkkSequence<T>` | range value scan です。 |
+| `count()` | `Long` | table range の row 数を数えます。 |
+| `count(startPk, endPk)` | `Long` | primary-key range の row 数を数えます。 |
+
+`AkkSequence` は lazy で cursor-backed です。`toList()`、`firstOrNull()`、`count()`、`forEach()` のような terminal operation で消費します。関数から返す場合は、consume 時に storage cursor を開くことを明示しておくと安全です。
+
+## secondary index を使う
+
+index は、その index で検索したい data を書く前に登録します。
+
+```kotlin
+val users = db.table<User, Long>("users") { it.id }
+users.index<String>("name")
+
+users.put(User(1L, "Alice", 30))
+users.put(User(2L, "Bob", 25))
+
+val alices = users.findBy("name", "Alice").toList()
+```
+
+native field index は queryable で、indexed query planning に使えます。custom index は Kotlin-side hook で maintenance され、`find()` には使えますが、native query index としては使われません。
+
+```kotlin
+users.index("nameLower") { user: User -> user.name.lowercase() }
+
+val result = users.findBy("nameLower", "alice").toList()
+```
+
+index は自動 backfill されません。既存 row を書いた後に index を登録した場合、その row を rewrite / reinsert するか、table rebuild を行ってから `findBy()` に依存してください。
+
+## query
+
+`query { ... }`、`exists { ... }`、`firstOrNull { ... }`、`runToList { ... }`、`count { ... }` は compiler plugin の rewrite 対象です。AkkaraDB compiler plugin が入っていない場合、runtime で例外を投げます。
+
+すでに `AkkQuery` AST を持っている場合は `runQ()` を使います。
+
+```kotlin
+val seq = users.runQ(query)
+val list = seq.toList()
+```
+
+`runQ()` は、登録済み native field index に対する equality probe を planning できるか確認します。できない場合は、table prefix 全体に対する native query scan に fallback します。
+
+### query planning notes
+
+native index fast path は現在 equality-oriented です。たとえば `name == "Alice" && age >= 18` は、`name` index が登録済みで queryable なら、その index を使ってから残りの predicate を query scan 中に評価できます。indexed equality probe がない query は table key range を scan します。
+
+Kotlin lambda form は application code 向けの入口ですが、native code に送られるのは serialized AST です。つまり、対応していない Kotlin expression は runtime reflection ではなく compiler plugin 側の問題になります。
+
+### query DSL support
+
+compiler plugin は `PackedTable` の call を rewrite します。
+
+| source call | rewritten shape |
+|---|---|
+| `query { predicate }` | `AkkQuery` を作ります。 |
+| `exists { predicate }` | `runQ(query).any()`。 |
+| `firstOrNull { predicate }` | `runQ(query).firstOrNull()`。 |
+| `runToList { predicate }` | `runQ(query).toList()`。 |
+| `count { predicate }` | `runQ(query).count()`。 |
+
+対応している predicate shape には、field access、nested field access、captured values、literals、`==`、`!=`、`<`、`<=`、`>`、`>=`、`&&`、`||`、`!`、null checks、`in`、`!in`、map indexing、`String.startsWith()`、`String.contains()`、`like()` があります。
+
+plugin が変換できない expression は captured value になります。constant には便利ですが、任意の Kotlin code が native query engine 内で実行されるわけではありません。
+
+## coroutines と Flow
+
+`AkkSequence` は `Flow` に変換できます。coroutine extension package には table operation の async wrapper もあります。
+
+```kotlin
+import kotlinx.coroutines.Dispatchers
+
+val flow = users.scanAllFlow(Dispatchers.IO)
+val byName = users.findByFlow("name", "Alice")
+
+val user = users.getAsync(1L)
+users.putAsync(User(2L, "Bob", 25))
+```
+
+これらの helper は、指定した dispatcher 上で blocking engine work を実行します。native engine 自体が non-blocking storage engine になるわけではないため、blocking I/O 向けの dispatcher を選びます。
+
+### coroutine method reference
+
+| helper | メモ |
+|---|---|
+| `scanAllFlow()`、`scanFlow()`、`scanValuesFlow()` | scan method の Flow wrapper。 |
+| `runQFlow(query)`、`findByFlow(fieldName, value)` | query / index read の Flow wrapper。 |
+| `putAsync(entity)`、`getAsync(pk)`、`removeAsync(pk)` | basic operation を dispatcher 上で実行します。 |
+| `existsAsync(pk)`、`countAsync()` | check / count を dispatcher 上で実行します。 |
+| `rowIdOfAsync(pk)`、`primaryKeyOfAsync(rowId)`、`getByRowIdAsync(rowId)` | row-id helper を dispatcher 上で実行します。 |
+| `getAtAsync(pk, seq)`、`historyAsync(pk)` | VersionLog helper を dispatcher 上で実行します。 |
+| `updatePrimaryKeyAsync(oldPk, entity)`、`upsertAsync(pk) { ... }` | mutation helper を dispatcher 上で実行します。 |
+
+## update hook
+
+`onUpdate()` を使うと、replacement entity を normalize / validate できます。
+
+```kotlin
+users.onUpdate { old, next ->
+    next.copy(
+        name = next.name.trim(),
+        age = next.age.coerceAtLeast(0)
+    )
+}
+```
+
+field-specific transform も書けます。
+
+```kotlin
+users.onUpdateField(User::name) { _, next ->
+    next.trim()
+}
+```
+
+hook は、既存 row の replacement、または `updatePrimaryKey()` の replacement transform 時に走ります。
+
+## row id reference
+
+`AkkRef<T>` は entry の internal row id を指します。`updatePrimaryKey()` は row id を維持したまま primary-key mapping を書き換えるため、primary key が変わっても reference は追従できます。
+
+```kotlin
+data class Author(val id: Long, val name: String)
+data class Post(val id: Long, val author: AkkRef<Author>, val title: String)
+
+val authors = db.table<Author, Long>("authors") { it.id }
+val posts = db.table<Post, Long>("posts") { it.id }
+
+authors.put(Author(1L, "Alice"))
+val authorRef = authors.ref(1L) ?: error("author missing")
+posts.put(Post(100L, authorRef, "hello"))
+
+authors.updatePrimaryKey(1L, Author(10L, "Alice Cooper"))
+
+val post = posts.get(100L)!!
+val author = post.author.get(authors)
+```
+
+attached ref は replacement value を cache して flush できます。
+
+```kotlin
+val ref = authors.ref(10L)!!.attach(authors)
+ref.replace(Author(10L, "Alice Updated")).flush()
+```
+
+## join
+
+join helper は table scan と lookup の上にある Kotlin-level view です。
+
+```kotlin
+val joined = posts.joinRef(authors) { it.author }
+    .where { post, author -> author.name.startsWith("Alice") }
+    .toList()
+```
+
+primary-key join も使えます。
+
+```kotlin
+val joined = posts.join(authors) { post -> post.authorId }.toList()
+```
+
+任意の key function を両側に渡す form もあります。この form は left row ごとに right table を scan するため、小さな dataset や tooling flow 向けです。
+
+## schema と foreign key
+
+`AkkaraSchema` は table を登録し、hook-based foreign-key check を入れます。
+
+```kotlin
+val schema = db.schema()
+val authors = schema.table<Author, Long>("authors") { it.id }
+val posts = schema.table<PlainPost, Long>("posts") { it.id }
+
+schema.foreignKey(
+    source = posts,
+    sourceField = PlainPost::authorId,
+    target = authors,
+    onDelete = OnDelete.Restrict,
+    onUpdate = OnUpdate.Cascade
+).open()
+```
+
+対応 action は次の通りです。
+
+| action | delete 時 | update 時 |
+|---|---|---|
+| `Restrict` | 参照されている target の削除を拒否します。 | 参照されている primary key の変更を拒否します。 |
+| `Cascade` | 参照元 source row を削除します。 | source field を new target key に更新します。 |
+| `SetNull` | nullable source field を `null` にします。 | nullable source field を `null` にします。 |
+
+`SetNull` には nullable source field が必要です。foreign-key check は native constraint engine ではなく、hook と scan で実装されています。
+
+### foreign key cost
+
+foreign-key action は、referencing row を探すために source table を scan します。small table、test、admin tool、simple embedded application では扱いやすい方式です。large table では、明示的な secondary index や application-level lookup table を用意し、全件 scan なしで referencing row を探せる形にするのが自然です。
+
+### foreign key behavior
+
+| event | `Restrict` | `Cascade` | `SetNull` |
+|---|---|---|---|
+| source `put()` が missing target を参照する | すべての mode で失敗します。 | すべての mode で失敗します。 | source value がすでに `null` の場合を除き失敗します。 |
+| target `remove()` | source row が参照していれば失敗します。 | referencing source row を remove します。 | nullable source field を `null` にします。 |
+| target primary-key update | source row が参照していれば失敗します。 | source field を new primary key に書き換えます。 | nullable source field を `null` にします。 |
+| source field が `AkkRef<T>` | target row id を使います。 | delete action は row id 経由で働きます。 | ref は row id を追うため、update action で ref 自体を書き換えません。 |
+
+## versioned read
+
+下の engine で VersionLog が有効な場合、`PackedTable` から過去 sequence の row と history を読めます。
+
+```kotlin
+val old = users.getAt(1L, targetSeq)
+val history = users.history(1L)
+db.rollbackTo(targetSeq)
+```
+
+table layer は typed primary key を underlying engine key に変換してから VersionLog API を呼びます。
+
+## common failure modes
+
+| 症状 | よくある原因 |
+|---|---|
+| `query { ... }` が runtime で例外を投げる | AkkaraDB compiler plugin が適用されていない。 |
+| `findBy()` が古い row を見つけない | row を書いた後に index を登録し、backfill していない。 |
+| `SetNull` が schema setup 時に失敗する | source field が nullable ではない。 |
+| `AkkRef` が resolve できない | 参照先 row が remove された、または detached ref に table を渡していない。 |
+| table rename 後に空に見える | table name が key namespace の一部になっている。 |
+| native library が load できない | plugin setup または `akkara.native.dir` 経由で compatible JNI/native library が見えていない。 |
+
+## practical starting point
+
+最初の application では、次の形が扱いやすいです。
+
+1. immutable Kotlin data class を使う。
+2. database directory ごとに 1 つの `AkkaraDB` を開く。
+3. table を開いた直後に index を全部登録する。
+4. query DSL call は Gradle/compiler plugin setup とセットで使う。
+5. primary-key update に追従する reference が必要なら `AkkRef` を使う。
+6. foreign-key hook は embedded-application helper として扱い、distributed constraint system とは分けて考える。
+
+## migration checklist
+
+data が存在した後に typed model を変える場合は、次のように扱います。
+
+| change | recommended handling |
+|---|---|
+| table rename | namespace prefix が変わるため、data migration として扱います。 |
+| index 追加 | index を登録し、existing rows を scan し、re-put / rebuild してから indexed read を有効化します。 |
+| primary-key type 変更 | encoded key order と bytes が変わるため、新 table または controlled rewrite にします。 |
+| data-class constructor field rename | schema/data compatibility change として扱います。query scan は field name を参照します。 |
+| nullable field 追加 | old data に対する BinPack/schema compatibility を明示的に扱うのが安全です。 |
+| relation semantics 変更 | schema hook を再登録し、serving writes 前に existing rows を検証します。 |
+| VersionLog を後から有効化 | history は underlying engine が version recording を始めた時点からになります。 |
+
+large dataset では、offline migration または controlled dual-write/rebuild phase を使います。高レベル API には online schema migration coordinator はありません。
+
+## production checklist
+
+high-level API deployment を出す前に確認します。
+
+1. JVM artifact、compiler plugin、JNI library、native library の compatible version を pin する。
+2. traffic を受ける前に、startup check で全 table を open し、index を登録する。
+3. database directory、table metadata keys、native identity/config files を同じ backup plan に入れる。
+4. test/runtime profile で compiler plugin なしの query DSL call を許可するか決める。
+5. foreign-key hook のうち、correctness-critical なものと convenience check を分けて document する。
+6. `AkkRef`、custom index、VersionLog を使う場合は restore from backup を実際に試す。

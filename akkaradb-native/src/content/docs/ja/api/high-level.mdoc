@@ -1,0 +1,28 @@
+---
+title: 高レベル API
+description: AkkEngine と PackedTable の上にある typed Kotlin API。
+---
+
+高レベル API は、AkkEngine の上にある Kotlin/JVM 向けの typed layer です。アプリケーション側では、byte key / byte value を直接組み立てる代わりに、`AkkaraDB`、`PackedTable`、secondary index、row-id reference、join、schema hook を使って Kotlin data class を扱えます。
+
+Kotlin の型を保った table-like API が欲しい場合に使います。binary key layout を直接制御したい場合、独自 protocol を作りたい場合、native C++ から engine を直接触りたい場合、engine 内部を検証したい場合は、低レベルの `AkkEngine` API が向いています。
+
+## 目的別に読む
+
+| 目的 | ページ |
+|---|---|
+| database を開き、table を定義し、typed operation を使う | [高レベル API の使い方](/akkaradb-native/ja/api/high-level/usage/) |
+| table、key、index、ref、schema hook が AkkEngine にどう対応するかを理解する | [高レベル API のアーキテクチャ](/akkaradb-native/ja/api/high-level/architecture/) |
+
+## 主な型
+
+| 型 | 役割 |
+|---|---|
+| `AkkaraDB` | `AkkEngine` handle を持ち、typed table を開きます。 |
+| `PackedTable<T, ID>` | 主キー付き entity を保存し、typed CRUD、scan、query、index、reference helper を提供します。 |
+| `AkkSequence<T>` | scan、index、query、join が返す lazy cursor-backed sequence です。 |
+| `AkkRef<T>` | 別 table entry への安定した row-id reference です。 |
+| `AkkaraSchema` | table と foreign-key style hook を登録します。 |
+
+この層の保存先は AkkEngine です。durability、VersionLog、compaction、Blob、server / cluster の挙動は、下にある engine options によって決まります。
+
