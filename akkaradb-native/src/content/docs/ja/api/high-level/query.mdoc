@@ -1,0 +1,80 @@
+---
+title: Query
+description: C++ typed query expressions、QueryView methods、index planning behavior。
+---
+
+高レベル query API は、overloaded C++ operators で expression type を組み立てます。runtime lambda interpreter ではなく、compiler plugin も不要です。
+
+## setup
+
+query で使う field は `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で登録します。
+
+```cpp
+struct Profile {
+    uint64_t id;
+    std::string email;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(Profile, id, email, name, age);
+```
+
+## basic query
+
+```cpp
+auto adults = profiles
+    .query([](auto profile) {
+        return profile.age >= 18;
+    })
+    .limit(10)
+    .toVector();
+```
+
+`query()` は `QueryView` を返します。iteration または terminal method を呼ぶまで lazy です。
+
+| Method | Result |
+|---|---|
+| `where(fn)` | logical `AND` で predicate を追加。 |
+| `limit(n)` | matched rows を制限。 |
+| `first()` | `std::optional<Entry>` を返します。 |
+| `any()` | `bool` を返します。 |
+| `count()` | matched rows を数えます。 |
+| `toVector()` | matched entries を materialize します。 |
+
+## supported expressions
+
+| Expression | Example |
+|---|---|
+| equality / comparison | `profile.age >= 18` |
+| logical operators | `profile.age >= 18 && profile.name != "Bob"` |
+| list membership | `profile.name.in({"Alice", "Carol"})` |
+| negative membership | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
+| string prefix/search | `profile.email.startsWith("a@")`, `profile.email.contains("@")` |
+| SQL-like string pattern | `profile.email.like("a@%")` |
+| optional checks | `profile.nickname.isNull()` |
+| nested fields | `user.address.template field<&Address::city>() == "Tokyo"` |
+| map lookup | `user.tags.get("tier") == std::optional<std::string>{"gold"}` |
+
+nested field は dependent template call になるため、`template field<...>()` と書きます。
+
+## index planning
+
+planner は registered index を探して candidate set を狭めます。返す前には必ず完全な expression で filter されます。
+
+| Predicate | Plan |
+|---|---|
+| `field == literal` | equality index range。 |
+| numeric range | `bool` 以外の arithmetic field では ordered index range。 |
+| `field.in(values)` | value ごとの equality range。candidate primary key は dedupe。 |
+| `field != literal`、`notIn`、`isNotNull` | full field-index scan + expression filtering。 |
+| `isNull` | encoded empty optional の equality range。 |
+| string `contains`、`startsWith`、一部の `like` | 現在の実装では full field-index scan + expression filtering。 |
+| `AND` | usable indexed side を選ぶことがあります。 |
+| `OR` | 正しく評価されますが、それ単体では multi-index union plan になりません。 |
+
+usable index がなければ table range scan に fallback します。
+
+## practical rules
+
+table を開いた直後に index を登録します。predicate は読みやすさのために query で書き、full table scan を避けたい predicate に index を足します。map や nested-field predicate は表現力のために使えますが、top-level indexed predicate がない限り index-seeded とは考えない方が安全です。

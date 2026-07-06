@@ -41,6 +41,20 @@ export default defineConfig({
 									translations: { ja: 'アーキテクチャ' },
 									slug: 'api/high-level/architecture',
 								},
+								{ label: 'AkkaraDB', translations: { ja: 'AkkaraDB' }, slug: 'api/high-level/akkaradb' },
+								{ label: 'PackedTable', translations: { ja: 'PackedTable' }, slug: 'api/high-level/packed-table' },
+								{ label: 'Query', translations: { ja: 'Query' }, slug: 'api/high-level/query' },
+								{ label: 'Ref And Join', translations: { ja: 'Ref と Join' }, slug: 'api/high-level/refs-joins' },
+								{
+									label: 'Schema And Foreign Keys',
+									translations: { ja: 'Schema と Foreign Key' },
+									slug: 'api/high-level/schema',
+								},
+								{
+									label: 'BinPack And Compatibility',
+									translations: { ja: 'BinPack と Compatibility' },
+									slug: 'api/high-level/binpack',
+								},
 							],
 						},
 						{

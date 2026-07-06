@@ -1,0 +1,68 @@
+---
+title: AkkaraDB
+description: Native high-level の AkkaraDB instance を開き、所有する方法。
+---
+
+`akkaradb::AkkaraDB` は高レベル API の owner object です。`engine::AkkEngine` を開き、高レベルの startup profile を engine options に変換し、typed table と schema registration を提供します。
+
+## open
+
+```cpp
+#include "akkaradb/AkkaraDB.hpp"
+
+auto db = akkaradb::AkkaraDB::open("data/app", akkaradb::StartupMode::NORMAL);
+```
+
+単純な embedded database では `open(path, mode)` を使います。storage components や API server settings を明示的に制御したい場合は `open(AkkaraDB::Options)` を使います。
+
+```cpp
+akkaradb::AkkaraDB::Options options;
+options.dataDir = "data/app";
+options.mode = akkaradb::StartupMode::DURABLE;
+options.overrides.versionLogEnabled = true;
+options.overrides.blobThresholdBytes = 64ULL * 1024ULL;
+
+auto db = akkaradb::AkkaraDB::open(std::move(options));
+```
+
+## StartupMode
+
+| Mode | engine behavior |
+|---|---|
+| `ULTRA_FAST` | WAL、SST、Blob、Manifest、VersionLog を無効化し、close 時の forced flush/sync も無効にし、大きい memtable threshold を使います。 |
+| `FAST` | WAL は async sync、VersionLog は無効、SST read promotion は有効、memtable threshold は大きめです。 |
+| `NORMAL` | 通常 component set と async WAL sync を使います。 |
+| `DURABLE` | sync WAL を使い、VersionLog を有効にします。 |
+
+StartupMode は preset として扱います。本番で依存する挙動は、`Options::overrides` で明示しておく方が読みやすくなります。
+
+## tables
+
+table は member pointer で開きます。
+
+```cpp
+auto users = db->table<&User::id>("users");
+```
+
+table name は物理的な key namespace の一部です。table rename は見た目の変更ではなく storage migration です。
+
+## engine access
+
+high-level wrapper は下層 engine を隠しません。
+
+```cpp
+auto& engine = db->engine();
+auto stats = engine.stats();
+```
+
+`PackedTable` に typed wrapper がない低レベル機能は `db->engine()` から使います。raw engine key に対する `getAt()`、`history()`、`rollbackKey()`、`rollbackTo()` などが該当します。
+
+## lifecycle
+
+`AkkaraDB` は engine を所有し、destructor で close しますが、service や test では明示的な close が便利です。
+
+```cpp
+db->close();
+```
+
+object は non-copyable / non-movable です。database directory ごとに 1 つの owner を持ち、storage access が必要な service には table や reference を渡す形にします。

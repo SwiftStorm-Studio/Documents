@@ -1,0 +1,72 @@
+---
+title: BinPack と Compatibility
+description: 高レベル API の対応 value shape と storage compatibility rules。
+---
+
+高レベル table は entity を BinPack で encode します。`PackedTable` は encoded entity を engine value として保存し、table prefix、primary-key bytes、index value、row-id metadata から key を組み立てます。
+
+## supported shapes
+
+| Shape | Notes |
+|---|---|
+| `bool` | 1 byte で encode。 |
+| signed/unsigned integers | fixed-width adapter。primary key と index では必要に応じて sortable encoding を使います。 |
+| `float`, `double` | fixed-width adapter。index value では sortable floating-point bytes を使います。 |
+| `enum` | underlying integer type で encode。 |
+| `std::string` | length-prefixed bytes。 |
+| `std::string_view` | write adapter only。decode が必要な persisted field には使わない方が安全です。 |
+| `std::vector<T>`, `std::array<T, N>` | element type も supported である必要があります。 |
+| `std::vector<uint8_t>` | length-prefixed byte payload。 |
+| `std::map<K, V>`, `std::unordered_map<K, V>` | key/value type も supported である必要があります。 |
+| `std::optional<T>` | presence byte + value がある場合の encoded value。 |
+| `std::pair<A, B>`, `std::tuple<Ts...>` | element-by-element で encode。 |
+| aggregate structs | trivially copyable aggregate は memcpy fast path。それ以外は Boost.PFR field order。 |
+| `akkaradb::Ref<T>` | referenced row id を encode。 |
+| `akkaradb::Immutable<T>` | wrapped value を encode し、decode 時は sealed。 |
+
+## compatibility rules
+
+BinPack は compact で direct な encoding です。self-describing schema migration format ではありません。
+
+次は storage migration として扱います。
+
+- table rename
+- primary-key type change
+- aggregate の field reorder
+- field type change
+- existing aggregate から field を削除
+- `Ref<T>` target の primary-key model change
+- foreign-key action に関わる optional/null semantics change
+
+## aggregate layout
+
+non-trivial aggregate struct では、Boost.PFR が declaration order で field を走査します。
+
+```cpp
+struct UserV1 {
+    uint64_t id;
+    std::string name;
+    uint32_t age;
+};
+```
+
+途中に field を追加すると、その後ろの byte layout が変わります。persisted data では explicit versioning または controlled rewrite を使います。
+
+## index encoding
+
+field index は indexed field value を index key に encode します。numeric / floating-point field は ordered scan のため sortable bytes を使います。`Immutable<T>` は wrapped value、`Ref<T>` は referenced row id を index します。
+
+つまり index compatibility は field の encoded representation に従います。incompatible field change の後は index rebuild が必要です。
+
+## practical migration pattern
+
+controlled change では次の流れが扱いやすいです。
+
+1. old struct で old table を開く。
+2. rows を scan する。
+3. 各 row を new struct に変換する。
+4. new table name または temporary database に書く。
+5. converted rows を書く前に index を登録する。
+6. 検証後に application code を切り替える。
+
+small embedded dataset では、bytes を in-place patch するより full rewrite の方が単純で安全なことが多いです。

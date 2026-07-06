@@ -1,0 +1,92 @@
+---
+title: Ref And Join
+description: Row-id references, lazy resolution, dirty ref flushes, and typed join views.
+---
+
+`Ref<T>` is the high-level reference type. It stores enough information to resolve another entity by stable row id or primary key, and it can lazily load the referenced value through a table binding.
+
+## Reference Traits
+
+Referenced types need `RefTraits<T>`. `AKKARADB_ENTITY` generates it.
+
+```cpp
+struct Author {
+    uint64_t id;
+    std::string name;
+};
+
+AKKARADB_ENTITY(Author, id, name);
+```
+
+## Store A Reference
+
+```cpp
+struct Post {
+    uint64_t id;
+    akkaradb::Ref<Author> author;
+    std::string title;
+};
+
+AKKARADB_ENTITY(Post, id, author, title);
+
+authors.put({1, "Alice"});
+posts.put({100, akkaradb::ref<Author>(1), "Hello"});
+```
+
+When the table or schema has a binding for `Author`, the ref can resolve lazily:
+
+```cpp
+auto post = posts.get(100);
+auto name = post->author->name;
+```
+
+## Ref States
+
+| State | Meaning |
+|---|---|
+| key known | `id()` can return without row-id lookup. |
+| row id known | `rowId()` can return or resolve through metadata. |
+| loaded | `operator->` and `operator*` can access the value. |
+| dirty | The referenced value should be written before the owner is stored. |
+| attached | A table binding is available for lazy resolution. |
+
+Creating a `Ref<T>` from a full entity marks it dirty. `PackedTable::put()` flushes dirty refs before writing the owning entity.
+
+## Primary-Key Changes
+
+Refs are stable across primary-key changes because the table maintains `pk2row` and `row2pk` metadata.
+
+```cpp
+authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
+```
+
+An existing `Ref<Author>` can still resolve through the row id after the visible primary key changes.
+
+## Joins
+
+Joins are typed read views over scans and lookups.
+
+```cpp
+auto rows = posts
+    .join<&Post::author>(authors)
+    .where([](const Post& post, const Author& author) {
+        return author.name == "Alice";
+    })
+    .toVector();
+```
+
+Plain-field joins specify both sides:
+
+```cpp
+auto rows = posts.join<&PlainPost::authorId, &Author::id>(authors).toVector();
+```
+
+## Execution Shape
+
+| Join form | Cost shape |
+|---|---|
+| `join<&RefField>(right)` | Left scan plus right row-id lookup. |
+| `join<&LeftField, &RightPk>(right)` | Left scan plus right primary-key lookup. |
+| `join<&LeftField, &RightField>(right)` | Left scan plus right scan for matching fields. |
+
+Join helpers do not install a native join plan. For large relation-heavy workloads, model lookup paths with explicit indexes or application-level materialized views.

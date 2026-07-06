@@ -3,9 +3,9 @@ title: 高レベル API
 description: AkkEngine の上にある Native C++ の typed table API。
 ---
 
-Native の高レベル API は、`akkaradb/AkkaraDB.hpp` にある C++ 向けの typed table 層です。`AkkEngine` の直接的な保存モデルはそのまま使いつつ、C++ の struct、主キー、セカンダリインデックス、クエリ式、参照、join、schema hook を扱えるようにします。
+Native の高レベル API は、`akkaradb/AkkaraDB.hpp` にある C++ 向けの typed table 層です。`AkkEngine` の直接的な保存モデルはそのまま使いつつ、C++ の struct、主キー、セカンダリインデックス、query expression、reference、join、schema hook を扱えるようにします。
 
-C++ アプリケーションに AkkaraDB Native を組み込み、byte key / byte value を自分で組み立てずに table 風の API を使いたい場合に向いています。バイナリのキーレイアウトを完全に制御したい場合、server / protocol 層を作る場合、engine の内部挙動を直接検証したい場合は、低レベルの `AkkEngine` API を使います。
+C++ application に AkkaraDB Native を組み込み、byte key / byte value を自分で組み立てずに table 風の API を使いたい場合に向いています。バイナリのキーレイアウトを完全に制御したい場合、server / protocol 層を作る場合、engine の内部挙動を直接検証したい場合は、低レベルの `AkkEngine` API を使います。
 
 ## 目的別に読む
 
@@ -13,6 +13,12 @@ C++ アプリケーションに AkkaraDB Native を組み込み、byte key / byt
 |---|---|
 | database を開き、struct を定義し、typed table 操作を使う | [高レベル API の使い方](/akkaradb-native/ja/api/high-level/usage/) |
 | typed table、index、ref、join、schema hook が `AkkEngine` にどう対応するかを理解する | [高レベル API のアーキテクチャ](/akkaradb-native/ja/api/high-level/architecture/) |
+| owner object と startup mode を設定する | [AkkaraDB](/akkaradb-native/ja/api/high-level/akkaradb/) |
+| typed CRUD、scan、index、hook、row id を使う | [PackedTable](/akkaradb-native/ja/api/high-level/packed-table/) |
+| C++ の typed query expression と index planning を理解する | [Query](/akkaradb-native/ja/api/high-level/query/) |
+| row-id reference と typed join を扱う | [Ref と Join](/akkaradb-native/ja/api/high-level/refs-joins/) |
+| schema hook と foreign-key action を登録する | [Schema と Foreign Key](/akkaradb-native/ja/api/high-level/schema/) |
+| value encoding と migration boundary を理解する | [BinPack と Compatibility](/akkaradb-native/ja/api/high-level/binpack/) |
 
 ## 主な型
 
@@ -20,9 +26,9 @@ C++ アプリケーションに AkkaraDB Native を組み込み、byte key / byt
 |---|---|
 | `akkaradb::AkkaraDB` | `engine::AkkEngine` を所有し、typed table を開きます。 |
 | `akkaradb::PackedTable<&T::id>` | C++ struct を主キーで保存し、typed CRUD、scan、query、index、ref、join helper を提供します。 |
-| `AKKARADB_ENTITY(Type, PrimaryKey, ...)` | struct の主キー情報と query 用フィールドを登録します。 |
-| `AKKARADB_QUERYABLE(Type, ...)` | `RefTraits` を宣言せず、C++ query proxy 用のフィールドだけを登録します。 |
-| `akkaradb::Ref<T>` | 別 entity への安定した row-id ベースの参照を保存します。 |
+| `AKKARADB_ENTITY(Type, PrimaryKey, ...)` | struct の主キー情報と query 用 field を登録します。 |
+| `AKKARADB_QUERYABLE(Type, ...)` | `RefTraits` を宣言せず、C++ query proxy 用の field だけを登録します。 |
+| `akkaradb::Ref<T>` | 別 entity への安定した row-id ベースの reference を保存します。 |
 | `akkaradb::AkkaraDB::Schema` | table と foreign-key 風の hook 動作を登録します。 |
 
 この層の保存先は引き続き `AkkEngine` です。WAL、memtable、SSTable、blob、VersionLog、API server、cluster の挙動は、database を開くときに指定した engine options によって決まります。

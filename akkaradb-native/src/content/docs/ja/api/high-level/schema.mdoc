@@ -1,0 +1,71 @@
+---
+title: Schema と Foreign Key
+description: table registration、ref binding、hook-based foreign-key actions。
+---
+
+`AkkaraDB::Schema` は typed table をまとめ、referential behavior を設定します。native constraint engine ではなく、高レベルの coordination helper です。
+
+## table registration
+
+```cpp
+auto schema = db->schema()
+    .table<&Author::id>("authors")
+    .table<&Post::id>("posts")
+    .open();
+
+auto& authors = schema.table<Author>();
+auto& posts = schema.table<Post>();
+```
+
+schema は C++ entity type ごとに table holder を保持します。また、登録済み table 間で `Ref<T>` field を解決するための ref binding も提供します。
+
+## Ref foreign key
+
+```cpp
+auto schema = db->schema()
+    .table<&Author::id>("authors")
+    .table<&Post::id>("posts")
+    .foreignKey<&Post::author>({akkaradb::OnDelete::Cascade}, {akkaradb::OnUpdate::Cascade})
+    .open();
+```
+
+`foreignKey<&Post::author>()` の field は `akkaradb::Ref<T>` である必要があります。target table は同じ schema に登録されている必要があります。
+
+## plain field foreign key
+
+```cpp
+schema.foreignKey<&PlainPost::authorId, &Author::id>(
+    {akkaradb::OnDelete::Restrict},
+    {akkaradb::OnUpdate::Cascade}
+);
+```
+
+source field と target field は comparable である必要があります。target field に `Ref<T>` は使えません。target field が target primary key でない場合、存在確認のために target table 側へ index が登録されます。
+
+## actions
+
+| Action | Delete | Primary-key update |
+|---|---|---|
+| `Restrict` | referenced target の delete を拒否。 | referenced target key の移動を拒否。 |
+| `Cascade` | target を参照する source rows を削除。 | source fields を new target key に書き換え。 |
+| `SetNull` | nullable source fields を `std::nullopt` に設定。 | nullable source fields を `std::nullopt` に設定。 |
+
+delete action と update action はそれぞれ 1 つだけ選べます。`SetNull` には `std::optional<T>` が必要です。
+
+## cost and boundaries
+
+source `put()` 時の foreign-key validation は target を確認します。non-primary target field では target-side index を使えます。
+
+delete / update action は referencing rows を見つけるために source table を scan します。単純で予測しやすい設計ですが、native indexed constraint engine の代替ではありません。
+
+large table で foreign-key action が hot path になる場合は、source-side index や application-level lookup table を用意します。
+
+## failure modes
+
+| Symptom | Likely cause |
+|---|---|
+| target table not registered | referenced entity が schema に追加されていません。 |
+| `SetNull` throws | source field が `std::optional<T>` ではありません。 |
+| delete restricted | source rows がまだ target を参照しています。 |
+| update restricted | source rows がまだ old target key を参照しています。 |
+| missing target on source put | source row が存在しない target を指しています。 |

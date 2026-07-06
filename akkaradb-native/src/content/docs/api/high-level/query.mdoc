@@ -1,0 +1,80 @@
+---
+title: Query
+description: C++ typed query expressions, QueryView methods, and index planning behavior.
+---
+
+The high-level query API builds expression types through overloaded C++ operators. It does not interpret runtime lambdas and does not require a compiler plugin.
+
+## Setup
+
+Fields used in a query must be registered with `AKKARADB_ENTITY` or `AKKARADB_QUERYABLE`.
+
+```cpp
+struct Profile {
+    uint64_t id;
+    std::string email;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(Profile, id, email, name, age);
+```
+
+## Basic Query
+
+```cpp
+auto adults = profiles
+    .query([](auto profile) {
+        return profile.age >= 18;
+    })
+    .limit(10)
+    .toVector();
+```
+
+`query()` returns a `QueryView`. It is lazy until you iterate it or call a terminal method.
+
+| Method | Result |
+|---|---|
+| `where(fn)` | Adds another predicate with logical `AND`. |
+| `limit(n)` | Limits matched rows. |
+| `first()` | Returns `std::optional<Entry>`. |
+| `any()` | Returns `bool`. |
+| `count()` | Counts matched rows. |
+| `toVector()` | Materializes matched entries. |
+
+## Supported Expressions
+
+| Expression | Example |
+|---|---|
+| Equality and comparison | `profile.age >= 18` |
+| Logical operators | `profile.age >= 18 && profile.name != "Bob"` |
+| List membership | `profile.name.in({"Alice", "Carol"})` |
+| Negative membership | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
+| String prefix/search | `profile.email.startsWith("a@")`, `profile.email.contains("@")` |
+| SQL-like string pattern | `profile.email.like("a@%")` |
+| Optional checks | `profile.nickname.isNull()` |
+| Nested fields | `user.address.template field<&Address::city>() == "Tokyo"` |
+| Map lookup | `user.tags.get("tier") == std::optional<std::string>{"gold"}` |
+
+Nested fields require `template field<...>()` because the proxy expression is a dependent template call.
+
+## Index Planning
+
+The planner looks for a registered index that can reduce the candidate set. The full expression is still evaluated before a row is returned.
+
+| Predicate | Plan |
+|---|---|
+| `field == literal` | Equality index range. |
+| numeric range | Ordered index range for arithmetic non-`bool` fields. |
+| `field.in(values)` | Multiple equality ranges with candidate primary-key dedupe. |
+| `field != literal`, `notIn`, `isNotNull` | Full field-index scan plus expression filtering. |
+| `isNull` | Equality range for encoded empty optional. |
+| string `contains`, `startsWith`, some `like` forms | Full field-index scan plus expression filtering in the current implementation. |
+| `AND` | Planner may choose a usable indexed side. |
+| `OR` | Correctly evaluated, but not currently a multi-index union plan by itself. |
+
+If no usable index is registered, the query scans the table range.
+
+## Practical Rules
+
+Register indexes immediately after opening a table. Use query predicates for readability, then add indexes for predicates that must avoid full table scans. Keep map and nested-field predicates for expressiveness, but do not assume they are index-seeded unless a top-level indexed predicate is also present.

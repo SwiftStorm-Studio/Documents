@@ -1,0 +1,98 @@
+---
+title: PackedTable
+description: Typed CRUD, scan, index, row-id, update hook, and immutable-field operations.
+---
+
+`PackedTable<&T::id>` is the main typed table API. It maps a C++ aggregate to one encoded value per primary key and maintains table metadata such as row-id mappings and secondary indexes.
+
+## Define A Table
+
+```cpp
+struct User {
+    uint64_t id;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(User, id, name, age);
+
+auto users = db->table<&User::id>("users");
+```
+
+`AKKARADB_ENTITY` registers both `RefTraits<User>` and query fields. Use `AKKARADB_QUERYABLE` when a type should be queryable but does not need `Ref<T>` support.
+
+## Core Methods
+
+| Method | Behavior |
+|---|---|
+| `put(entity)` | Insert or replace by the entity primary key. |
+| `get(pk)` | Return `std::optional<Entity>`. |
+| `getInto(pk, out)` | Decode into caller-owned storage. |
+| `exists(pk)` | Check current row existence. |
+| `remove(pk)` | Remove the row, row-id metadata, and index entries. |
+| `upsert(pk, fn)` | Load or default-construct, set primary key, run a mutation callback, then write. |
+| `updatePrimaryKey(oldPk, entity)` | Move a row to a new primary key while preserving row id. |
+| `count()` | Count rows in the table namespace. |
+
+## Primary-Key Updates
+
+`put()` is for replacing the value under the same primary key. Use `updatePrimaryKey()` when the identity itself moves.
+
+```cpp
+users.updatePrimaryKey(1, User{10, "Alice Cooper", 31});
+```
+
+The destination primary key must not exist. The stable row id is preserved so `Ref<T>` values can continue to resolve.
+
+## Scans
+
+`scanAll()` scans the whole table namespace. `scan(startPk, endPk)` scans a half-open primary-key range.
+
+```cpp
+auto rows = users.scan(100ULL, 200ULL);
+while (rows.hasNext()) {
+    auto entry = rows.next();
+}
+```
+
+The returned `Entry` contains `id` and `value`. Numeric primary keys are encoded in sortable byte order, so range scans follow natural numeric order.
+
+## Indexes
+
+Register indexes before writing rows that should be visible through the index.
+
+```cpp
+auto byEmail = users.index<&User::email>();
+auto alice = byEmail.find("alice@example.test");
+```
+
+`indexed<&Field>()` is a chainable registration helper. `findBy<&Field>(value)` returns the first matching entity and throws if the field index was not registered.
+
+Index entries are updated on insert, replacement, remove, and primary-key update. Existing rows are not backfilled automatically.
+
+## Update Hooks
+
+`onUpdate<&Field>()` runs when an existing row is replaced and that field changes.
+
+```cpp
+users.onUpdate<&User::age>(
+    [](const auto& oldAge, const auto& newAge, const User& oldUser, User& nextUser) {
+        nextUser.name = oldUser.name;
+    }
+);
+```
+
+Hooks run before the replacement entity is encoded. Keep them deterministic and local to the table write path.
+
+## Immutable Fields
+
+`Immutable<T>` protects fields after they are loaded or persisted.
+
+```cpp
+struct Account {
+    uint64_t id;
+    akkaradb::Immutable<std::string> handle;
+};
+```
+
+Changing a sealed immutable field during replacement throws. Primary-key fields cannot use `Immutable<T>`.

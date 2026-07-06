@@ -1,0 +1,68 @@
+---
+title: AkkaraDB
+description: Opening and owning a native high-level AkkaraDB database instance.
+---
+
+`akkaradb::AkkaraDB` is the high-level owner object. It opens an `engine::AkkEngine`, maps high-level startup profiles into engine options, exposes typed tables, and gives access to schema registration.
+
+## Open
+
+```cpp
+#include "akkaradb/AkkaraDB.hpp"
+
+auto db = akkaradb::AkkaraDB::open("data/app", akkaradb::StartupMode::NORMAL);
+```
+
+Use `open(path, mode)` for a simple embedded database. Use `open(AkkaraDB::Options)` when you need explicit control over storage components or API server settings.
+
+```cpp
+akkaradb::AkkaraDB::Options options;
+options.dataDir = "data/app";
+options.mode = akkaradb::StartupMode::DURABLE;
+options.overrides.versionLogEnabled = true;
+options.overrides.blobThresholdBytes = 64ULL * 1024ULL;
+
+auto db = akkaradb::AkkaraDB::open(std::move(options));
+```
+
+## Startup Modes
+
+| Mode | Engine behavior |
+|---|---|
+| `ULTRA_FAST` | Disables WAL, SST, Blob, Manifest, and VersionLog, disables forced flush/sync on close, and uses a large memtable threshold. |
+| `FAST` | Uses async WAL sync, disables VersionLog, promotes SST reads, and raises the memtable threshold. |
+| `NORMAL` | Uses async WAL sync with the regular component set. |
+| `DURABLE` | Uses sync WAL and enables VersionLog. |
+
+Treat startup modes as presets. For stable production behavior, prefer explicit `Options::overrides` for the settings you depend on.
+
+## Tables
+
+Tables are opened by member pointer:
+
+```cpp
+auto users = db->table<&User::id>("users");
+```
+
+The table name becomes part of the physical key namespace. Renaming a table is a storage migration, not a cosmetic refactor.
+
+## Engine Access
+
+The high-level wrapper does not hide the underlying engine.
+
+```cpp
+auto& engine = db->engine();
+auto stats = engine.stats();
+```
+
+Use `db->engine()` for low-level features that do not have typed wrappers. That includes explicit VersionLog operations such as `getAt()`, `history()`, `rollbackKey()`, and `rollbackTo()` on raw engine keys.
+
+## Lifecycle
+
+`AkkaraDB` owns the engine and closes it in the destructor, but explicit close is still useful in services and tests.
+
+```cpp
+db->close();
+```
+
+The object is non-copyable and non-movable. Keep one owner per database directory and pass references to tables or application services that need storage access.

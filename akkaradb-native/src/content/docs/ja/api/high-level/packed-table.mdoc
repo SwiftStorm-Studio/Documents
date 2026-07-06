@@ -1,0 +1,98 @@
+---
+title: PackedTable
+description: typed CRUD、scan、index、row-id、update hook、immutable field の操作。
+---
+
+`PackedTable<&T::id>` は高レベル API の中心です。C++ aggregate を主キーごとに 1 つの encoded value として保存し、row-id mapping や secondary index などの table metadata を管理します。
+
+## table を定義する
+
+```cpp
+struct User {
+    uint64_t id;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(User, id, name, age);
+
+auto users = db->table<&User::id>("users");
+```
+
+`AKKARADB_ENTITY` は `RefTraits<User>` と query fields の両方を登録します。query だけ必要で `Ref<T>` support が不要なら `AKKARADB_QUERYABLE` を使います。
+
+## core methods
+
+| Method | Behavior |
+|---|---|
+| `put(entity)` | entity primary key で insert または replace。 |
+| `get(pk)` | `std::optional<Entity>` を返します。 |
+| `getInto(pk, out)` | caller-owned storage に decode します。 |
+| `exists(pk)` | current row の存在確認。 |
+| `remove(pk)` | row、row-id metadata、index entries を削除。 |
+| `upsert(pk, fn)` | load または default-construct し、primary key を設定して callback 後に write。 |
+| `updatePrimaryKey(oldPk, entity)` | row id を保ったまま new primary key へ移動。 |
+| `count()` | table namespace 内の row 数を数えます。 |
+
+## primary-key update
+
+`put()` は同じ primary key の value を置き換える API です。identity 自体を移動する場合は `updatePrimaryKey()` を使います。
+
+```cpp
+users.updatePrimaryKey(1, User{10, "Alice Cooper", 31});
+```
+
+移動先 primary key は存在してはいけません。stable row id は維持されるため、`Ref<T>` は引き続き解決できます。
+
+## scans
+
+`scanAll()` は table namespace 全体を scan します。`scan(startPk, endPk)` は half-open primary-key range を scan します。
+
+```cpp
+auto rows = users.scan(100ULL, 200ULL);
+while (rows.hasNext()) {
+    auto entry = rows.next();
+}
+```
+
+返る `Entry` には `id` と `value` が入ります。数値 primary key は sortable byte order で encode されるため、range scan は自然な数値順になります。
+
+## indexes
+
+index は、その index で見つけたい row を書く前に登録します。
+
+```cpp
+auto byEmail = users.index<&User::email>();
+auto alice = byEmail.find("alice@example.test");
+```
+
+`indexed<&Field>()` は chainable な registration helper です。`findBy<&Field>(value)` は最初に見つかった entity を返し、field index が未登録なら throw します。
+
+index entries は insert、replacement、remove、primary-key update で更新されます。既存 row は自動 backfill されません。
+
+## update hooks
+
+`onUpdate<&Field>()` は、既存 row の置き換えで対象 field が変わったときに実行されます。
+
+```cpp
+users.onUpdate<&User::age>(
+    [](const auto& oldAge, const auto& newAge, const User& oldUser, User& nextUser) {
+        nextUser.name = oldUser.name;
+    }
+);
+```
+
+hook は replacement entity が encode される前に走ります。table write path の中で実行されるため、deterministic で local な処理に留めるのが扱いやすいです。
+
+## immutable fields
+
+`Immutable<T>` は、読み込み後または保存後に変更したくない field を守ります。
+
+```cpp
+struct Account {
+    uint64_t id;
+    akkaradb::Immutable<std::string> handle;
+};
+```
+
+sealed immutable field を replacement 時に変更すると throw します。primary-key field には `Immutable<T>` を使えません。

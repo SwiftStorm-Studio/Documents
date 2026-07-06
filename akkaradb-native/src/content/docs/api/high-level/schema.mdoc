@@ -1,0 +1,71 @@
+---
+title: Schema And Foreign Keys
+description: Registering tables, binding refs, and installing hook-based foreign-key actions.
+---
+
+`AkkaraDB::Schema` groups typed tables and installs referential behavior. It is a high-level coordination helper, not a native constraint engine.
+
+## Register Tables
+
+```cpp
+auto schema = db->schema()
+    .table<&Author::id>("authors")
+    .table<&Post::id>("posts")
+    .open();
+
+auto& authors = schema.table<Author>();
+auto& posts = schema.table<Post>();
+```
+
+The schema stores table holders by C++ entity type. It also provides ref bindings so `Ref<T>` fields can resolve across registered tables.
+
+## Ref Foreign Key
+
+```cpp
+auto schema = db->schema()
+    .table<&Author::id>("authors")
+    .table<&Post::id>("posts")
+    .foreignKey<&Post::author>({akkaradb::OnDelete::Cascade}, {akkaradb::OnUpdate::Cascade})
+    .open();
+```
+
+`foreignKey<&Post::author>()` requires the field to be `akkaradb::Ref<T>`. The target table must be registered in the same schema.
+
+## Plain Field Foreign Key
+
+```cpp
+schema.foreignKey<&PlainPost::authorId, &Author::id>(
+    {akkaradb::OnDelete::Restrict},
+    {akkaradb::OnUpdate::Cascade}
+);
+```
+
+The source field and target field must be comparable. The target field cannot be a `Ref<T>`. If the target field is not the target primary key, the target table registers an index for existence checks.
+
+## Actions
+
+| Action | Delete | Primary-key update |
+|---|---|---|
+| `Restrict` | Rejects deleting a referenced target. | Rejects moving a referenced target key. |
+| `Cascade` | Removes source rows that reference the target. | Rewrites source fields to the new target key. |
+| `SetNull` | Sets nullable source fields to `std::nullopt`. | Sets nullable source fields to `std::nullopt`. |
+
+Only one delete action and one update action can be selected. `SetNull` requires `std::optional<T>`.
+
+## Cost And Boundaries
+
+Foreign-key validation on source `put()` checks the target. For non-primary target fields, validation can use a target-side index.
+
+Delete and update actions scan the source table to find referencing rows. This is simple and predictable, but it is not a substitute for a native indexed constraint engine.
+
+For large tables, add an explicit source-side index or maintain an application-level lookup table if foreign-key actions are on a hot path.
+
+## Failure Modes
+
+| Symptom | Likely cause |
+|---|---|
+| Target table not registered | The referenced entity was not added to the schema. |
+| `SetNull` throws | Source field is not `std::optional<T>`. |
+| Delete restricted | Source rows still reference the target. |
+| Update restricted | Source rows still reference the old target key. |
+| Missing target on source put | The source row points to a target that does not exist. |

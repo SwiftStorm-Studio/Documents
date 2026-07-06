@@ -1,0 +1,72 @@
+---
+title: BinPack And Compatibility
+description: Supported high-level value shapes and storage compatibility rules.
+---
+
+High-level tables encode entities with BinPack. `PackedTable` stores one encoded entity as the engine value and builds keys from table prefixes, primary-key bytes, index values, and row-id metadata.
+
+## Supported Shapes
+
+| Shape | Notes |
+|---|---|
+| `bool` | Encoded as one byte. |
+| signed/unsigned integers | Fixed-width adapters. Primary keys and indexes use sortable encodings where needed. |
+| `float`, `double` | Fixed-width adapters; index values use sortable floating-point bytes. |
+| `enum` | Encoded through the underlying integer type. |
+| `std::string` | Length-prefixed bytes. |
+| `std::string_view` | Write adapter only. Do not model persisted fields as `string_view` if they must be decoded. |
+| `std::vector<T>`, `std::array<T, N>` | Element type must also be supported. |
+| `std::vector<uint8_t>` | Length-prefixed byte payload. |
+| `std::map<K, V>`, `std::unordered_map<K, V>` | Key and value types must be supported. |
+| `std::optional<T>` | Presence byte plus encoded value when present. |
+| `std::pair<A, B>`, `std::tuple<Ts...>` | Encoded element-by-element. |
+| aggregate structs | Trivially copyable aggregates use a memcpy fast path; other aggregates use Boost.PFR field order. |
+| `akkaradb::Ref<T>` | Encodes the referenced row id. |
+| `akkaradb::Immutable<T>` | Encodes the wrapped value and decodes as sealed. |
+
+## Compatibility Rules
+
+BinPack is compact and direct. It is not a self-describing schema migration format.
+
+Treat these as storage migrations:
+
+- table rename
+- primary-key type change
+- field reorder in an aggregate
+- field type change
+- removing a field from an existing aggregate
+- changing a `Ref<T>` target's primary-key model
+- changing optional/null semantics used by foreign-key actions
+
+## Aggregate Layout
+
+For non-trivial aggregate structs, Boost.PFR walks fields in declaration order.
+
+```cpp
+struct UserV1 {
+    uint64_t id;
+    std::string name;
+    uint32_t age;
+};
+```
+
+Adding a field in the middle changes the byte layout for everything after it. For persisted data, prefer explicit versioning or a controlled rewrite.
+
+## Index Encoding
+
+Field indexes encode the indexed field value into the index key. Numeric and floating-point fields use sortable bytes so ordered scans can work. `Immutable<T>` indexes the wrapped value. `Ref<T>` indexes the referenced row id.
+
+This means index compatibility follows the field's encoded representation. Rebuilding indexes is required after incompatible field changes.
+
+## Practical Migration Pattern
+
+For a controlled change:
+
+1. Open the old table with the old struct.
+2. Scan rows.
+3. Convert each row to the new struct.
+4. Write into a new table name or a temporary database.
+5. Register indexes before writing the converted rows.
+6. Switch application code after verification.
+
+For small embedded datasets, a full rewrite is often simpler and safer than trying to patch bytes in place.
