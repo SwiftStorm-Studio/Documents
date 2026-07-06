@@ -121,6 +121,8 @@ Compare `bytesUncompressed` and `bytesOnDisk` when compression is enabled. `gcCy
 
 Use `pendingBytes` and `asyncMaxPendingBytes` to detect backpressure risk. `rollbackEntries` should be nonzero only when rollback APIs are used.
 
+For how these fields relate to the write path and file durability, see [VersionLog](/akkaradb-native/api/low-level/version-log/).
+
 ## API Stats
 
 `stats.api` is populated when the API server component is enabled.

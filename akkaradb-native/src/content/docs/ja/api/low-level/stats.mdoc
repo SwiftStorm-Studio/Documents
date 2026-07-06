@@ -121,6 +121,8 @@ const double readHitRate =
 
 `pendingBytes` と `asyncMaxPendingBytes` はバックプレッシャーの兆候を見るために使います。`rollbackEntries` はロールバック API を使った場合だけ増えるのが自然です。
 
+これらの値と書き込み経路、ファイル永続化の関係は [VersionLog](/akkaradb-native/ja/api/low-level/version-log/) に分けています。
+
 ## API 統計
 
 `stats.api` は API サーバーコンポーネントを有効化した場合に意味を持ちます。

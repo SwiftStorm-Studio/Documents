@@ -64,6 +64,7 @@ export default defineConfig({
 												},
 											],
 										},
+										{ label: 'VersionLog', translations: { ja: 'VersionLog' }, slug: 'api/low-level/version-log' },
 										{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
 										{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
 									],

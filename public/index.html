@@ -42,6 +42,45 @@
         padding: 72px 0;
       }
 
+      .topbar {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 44px;
+      }
+
+      .language-switch {
+        display: inline-flex;
+        gap: 4px;
+        padding: 4px;
+        background: rgba(13, 18, 29, 0.78);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+      }
+
+      .language-switch button {
+        min-width: 72px;
+        padding: 7px 12px;
+        color: var(--muted);
+        background: transparent;
+        border: 0;
+        border-radius: 999px;
+        font: inherit;
+        font-size: 0.86rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .language-switch button:hover,
+      .language-switch button:focus-visible {
+        color: var(--text);
+        outline: none;
+      }
+
+      .language-switch button[aria-pressed="true"] {
+        color: #03111c;
+        background: var(--accent);
+      }
+
       header {
         margin-bottom: 32px;
       }
@@ -131,29 +170,119 @@
       footer a {
         color: var(--accent);
       }
+
+      @media (max-width: 560px) {
+        main {
+          width: min(100% - 28px, 980px);
+          padding: 28px 0 56px;
+        }
+
+        .topbar {
+          margin-bottom: 36px;
+        }
+      }
     </style>
   </head>
   <body>
     <main>
+      <nav class="topbar" aria-label="Language">
+        <div class="language-switch">
+          <button type="button" data-lang-button="en" aria-pressed="true">English</button>
+          <button type="button" data-lang-button="ja" aria-pressed="false">日本語</button>
+        </div>
+      </nav>
+
       <header>
-        <p class="eyebrow">SwiftStorm Studio Docs</p>
-        <h1>Documentation</h1>
-        <p class="intro">
+        <p class="eyebrow" data-i18n="eyebrow">SwiftStorm Studio Docs</p>
+        <h1 data-i18n="title">Documentation</h1>
+        <p class="intro" data-i18n="intro">
           Technical documentation for SwiftStorm Studio projects. Choose a project to open its
           API guides, architecture notes, and benchmark references.
         </p>
       </header>
 
-      <section class="docs-grid" aria-label="Documentation projects">
-        <a class="doc-link" href="/akkaradb-native/">
-          <span>Storage Engine</span>
-          <strong>AkkaraDB Native</strong>
-          <p>
+      <section class="docs-grid" aria-label="Documentation projects" data-i18n-aria="projectsLabel">
+        <a class="doc-link" href="/akkaradb-native/" data-doc-link>
+          <span data-i18n="akkaraTag">Storage Engine</span>
+          <strong data-i18n="akkaraTitle">AkkaraDB Native</strong>
+          <p data-i18n="akkaraDescription">
             C++ storage engine documentation covering the low-level key/value API and typed table
             API surface.
           </p>
         </a>
       </section>
     </main>
+
+    <script>
+      const messages = {
+        en: {
+          documentTitle: 'SwiftStorm Studio Docs',
+          eyebrow: 'SwiftStorm Studio Docs',
+          title: 'Documentation',
+          intro:
+            'Technical documentation for SwiftStorm Studio projects. Choose a project to open its API guides, architecture notes, and benchmark references.',
+          projectsLabel: 'Documentation projects',
+          akkaraTag: 'Storage Engine',
+          akkaraTitle: 'AkkaraDB Native',
+          akkaraDescription:
+            'C++ storage engine documentation covering the low-level key/value API and typed table API surface.',
+          akkaraHref: '/akkaradb-native/',
+        },
+        ja: {
+          documentTitle: 'SwiftStorm Studio Docs',
+          eyebrow: 'SwiftStorm Studio Docs',
+          title: 'ドキュメント',
+          intro:
+            'SwiftStorm Studio の技術ドキュメントです。各プロジェクトの API ガイド、アーキテクチャノート、ベンチマーク資料をここから開けます。',
+          projectsLabel: 'ドキュメントプロジェクト',
+          akkaraTag: 'ストレージエンジン',
+          akkaraTitle: 'AkkaraDB Native',
+          akkaraDescription:
+            '低レベルのキー・バリュー API と typed table API を扱う、C++ ストレージエンジン向けドキュメントです。',
+          akkaraHref: '/akkaradb-native/ja/',
+        },
+      };
+
+      const languageCookieName = 'swiftstorm_docs_language';
+      const savedLanguage =
+        document.cookie
+          .split('; ')
+          .find((item) => item.startsWith(`${languageCookieName}=`))
+          ?.split('=')[1] || localStorage.getItem('swiftstorm-docs-language');
+      const preferredLanguage = navigator.language.toLowerCase().startsWith('ja') ? 'ja' : 'en';
+      const initialLanguage = savedLanguage in messages ? savedLanguage : preferredLanguage;
+
+      function setLanguage(language) {
+        const content = messages[language] || messages.en;
+
+        document.documentElement.lang = language;
+        document.title = content.documentTitle;
+        localStorage.setItem('swiftstorm-docs-language', language);
+        document.cookie = `${languageCookieName}=${language}; Max-Age=31536000; Path=/; SameSite=Lax`;
+
+        for (const element of document.querySelectorAll('[data-i18n]')) {
+          element.textContent = content[element.dataset.i18n];
+        }
+
+        for (const element of document.querySelectorAll('[data-i18n-aria]')) {
+          element.setAttribute('aria-label', content[element.dataset.i18nAria]);
+        }
+
+        const docLink = document.querySelector('[data-doc-link]');
+        if (docLink) {
+          docLink.href = content.akkaraHref;
+        }
+
+        for (const button of document.querySelectorAll('[data-lang-button]')) {
+          button.setAttribute('aria-pressed', String(button.dataset.langButton === language));
+        }
+      }
+
+      for (const button of document.querySelectorAll('[data-lang-button]')) {
+        button.addEventListener('click', () => setLanguage(button.dataset.langButton));
+      }
+
+      setLanguage(initialLanguage);
+    </script>
   </body>
 </html>
