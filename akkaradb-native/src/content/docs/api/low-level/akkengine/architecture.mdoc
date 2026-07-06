@@ -1,0 +1,68 @@
+---
+title: AkkEngine Architecture
+description: How AkkEngine maps byte operations to WAL, MemTable, SST, Blob, VersionLog, and scans.
+---
+
+`AkkEngine` is the storage core underneath the higher-level table API, API server, cluster runtime, and VersionLog features. It accepts byte keys and byte values, assigns sequence numbers, and coordinates the enabled storage components.
+
+## Runtime Shape
+
+| Part | Role |
+|---|---|
+| Public API | `put`, `remove`, `get`, `scan`, `history`, `getAt`, rollback, stats, flush, sync, close. |
+| WAL | Durable write-ahead log for current-state mutations when enabled. |
+| MemTable | In-memory current-state index for recent writes and tombstones. |
+| SST | Persistent sorted files for flushed current-state data. |
+| Blob | External storage for values over the configured threshold. |
+| VersionLog | Append-only history stream for old values and rollback when enabled. |
+| Manifest | Persistent metadata for storage files and recovery. |
+
+## Write Path
+
+A normal `put(key, value)` validates the engine state, assigns a sequence number, records durable state through the configured components, and updates current in-memory state. `remove(key)` follows the same path but writes a tombstone.
+
+When WAL is enabled, current-state mutation is written to the WAL according to the configured sync mode. When VersionLog is enabled, historical metadata is also recorded so the key can be inspected or rolled back later. Large values may be redirected to Blob storage while the visible key still behaves like a normal key/value entry.
+
+## Read Path
+
+Reads check current-state storage first. A recent value may be served from MemTable. Older flushed values may be found in SST files. Blob-backed values are resolved through Blob metadata before returning the logical value.
+
+`get()` returns an owning vector. `getInto()` reuses caller-owned storage. `getIntoArena()` returns a view tied to a `BufferArena`, which is useful for local hot paths but must not escape the arena lifetime.
+
+## Scan Path
+
+`scan(arena, start, end)` walks a half-open byte range `[start, end)`. The returned views are arena-backed and remain valid only while the arena is alive and not reset.
+
+Because the engine sorts raw bytes lexicographically, range behavior is controlled by the caller's key encoding. Text prefixes, sortable big-endian numeric keys, and fixed-width segments are common patterns.
+
+## Durability Boundary
+
+Durability is configured, not implied by the API name.
+
+| Control | Effect |
+|---|---|
+| WAL sync mode | Controls how aggressively current-state mutations are synchronized. |
+| `forceFlush()` | Moves MemTable state toward SST storage. |
+| `forceSync()` | Synchronizes durable state such as WAL and VersionLog. |
+| `runtime.forceFlushOnClose` | Flush behavior during close. |
+| `runtime.forceSyncOnClose` | Sync behavior during close. |
+
+Use `DURABLE`-style settings or explicit sync calls when the application needs a clear persistence boundary before continuing.
+
+## VersionLog Boundary
+
+VersionLog is an engine component. `history(key)`, `getAt(key, seq)`, `rollbackKey(key, seq)`, and `rollbackTo(seq)` operate on byte keys and engine sequence numbers.
+
+`rollbackKey()` affects one key. `rollbackTo()` rewrites the engine state back to a sequence and has a much wider operational blast radius. Blob GC is intentionally incompatible with enabled VersionLog because old versions may still reference blob-backed values.
+
+## Ownership Boundary
+
+`AkkEngine` does not understand schemas or typed entities. It stores bytes. The caller owns:
+
+- key layout and prefix rules
+- value encoding
+- schema compatibility
+- cross-key invariants
+- request/thread ownership of returned buffers
+
+The high-level API adds typed struct encoding and table metadata above this layer, but it still ultimately writes byte keys and byte values into `AkkEngine`.

@@ -47,51 +47,58 @@ export default defineConfig({
 							label: 'Low-Level API',
 							translations: { ja: '低レベル API' },
 							items: [
+								{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level' },
 								{
 									label: 'AkkEngine',
 									items: [
-										{ label: 'Core Usage', translations: { ja: '基本操作' }, slug: 'api/low-level' },
+										{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/akkengine' },
+										{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/akkengine/usage' },
 										{
-											label: 'API Server',
-											translations: { ja: 'API サーバー' },
-											items: [
-												{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/api-server' },
-												{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/api-server/usage' },
-												{
-													label: 'Architecture',
-													translations: { ja: 'アーキテクチャ' },
-													slug: 'api/low-level/api-server/architecture',
-												},
-											],
-										},
-										{
-											label: 'Cluster',
-											translations: { ja: 'Cluster' },
-											items: [
-												{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/cluster' },
-												{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/cluster/usage' },
-												{
-													label: 'Architecture',
-													translations: { ja: 'アーキテクチャ' },
-													slug: 'api/low-level/cluster/architecture',
-												},
-											],
-										},
-										{
-											label: 'VersionLog',
-											translations: { ja: 'VersionLog' },
-											items: [
-												{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/version-log' },
-												{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/version-log/usage' },
-												{
-													label: 'Architecture',
-													translations: { ja: 'アーキテクチャ' },
-													slug: 'api/low-level/version-log/architecture',
-												},
-											],
+											label: 'Architecture',
+											translations: { ja: 'アーキテクチャ' },
+											slug: 'api/low-level/akkengine/architecture',
 										},
 										{ label: 'Options', translations: { ja: '設定オプション' }, slug: 'api/low-level/options' },
 										{ label: 'Stats', translations: { ja: '統計情報' }, slug: 'api/low-level/stats' },
+									],
+								},
+								{
+									label: 'API Server',
+									translations: { ja: 'API サーバー' },
+									items: [
+										{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/api-server' },
+										{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/api-server/usage' },
+										{
+											label: 'Architecture',
+											translations: { ja: 'アーキテクチャ' },
+											slug: 'api/low-level/api-server/architecture',
+										},
+									],
+								},
+								{
+									label: 'Cluster',
+									translations: { ja: 'Cluster' },
+									items: [
+										{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/cluster' },
+										{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/cluster/usage' },
+										{
+											label: 'Architecture',
+											translations: { ja: 'アーキテクチャ' },
+											slug: 'api/low-level/cluster/architecture',
+										},
+									],
+								},
+								{
+									label: 'VersionLog',
+									translations: { ja: 'VersionLog' },
+									items: [
+										{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/version-log' },
+										{ label: 'Usage', translations: { ja: '使い方' }, slug: 'api/low-level/version-log/usage' },
+										{
+											label: 'Architecture',
+											translations: { ja: 'アーキテクチャ' },
+											slug: 'api/low-level/version-log/architecture',
+										},
 									],
 								},
 							],

@@ -1,0 +1,19 @@
+---
+title: AkkEngine
+description: Overview of the native byte-oriented storage engine API.
+---
+
+`akkaradb::engine::AkkEngine` is the direct byte-oriented key/value engine. Keys and values are passed as `std::span<const uint8_t>`, and schema, table layout, value encoding, and key naming are owned by the caller.
+
+Use this layer when you need exact control over binary key layout, durability options, scans, VersionLog behavior, Blob storage, or storage-engine internals.
+
+## Pages
+
+| Page | Purpose |
+|---|---|
+| [Usage](/akkaradb-native/api/low-level/akkengine/usage/) | Open an engine, read/write bytes, scan ranges, use history, blobs, stats, and close safely. |
+| [Architecture](/akkaradb-native/api/low-level/akkengine/architecture/) | Understand the write path, read path, storage components, lifetimes, and durability boundaries. |
+| [Options](/akkaradb-native/api/low-level/options/) | Full `AkkEngineOptions` map. |
+| [Stats](/akkaradb-native/api/low-level/stats/) | Runtime counters and interpretation notes. |
+
+For typed C++ structs, prefer the high-level `AkkaraDB` / `PackedTable` API.
