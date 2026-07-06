@@ -40,12 +40,14 @@ int main() {
 
 | Mode | 主な用途 |
 |---|---|
-| `ULTRA_FAST` | smoke test、benchmark、短時間のローカル実験。 |
-| `FAST` | 起動速度を優先したい場合。 |
-| `NORMAL` | 一般的な embedded 利用。 |
-| `DURABLE` | startup/write speed より durability を優先したい場合。 |
+| `ULTRA_FAST` | smoke test、benchmark、短時間のローカル実験。WAL、SST、blob、manifest、VersionLog を無効化し、close 時の強制 flush/sync も無効にして、大きめの memtable threshold を使います。 |
+| `FAST` | 起動速度を優先したい場合。WAL は async sync、VersionLog は無効、SST read promotion は有効、大きめの memtable threshold を使います。 |
+| `NORMAL` | 一般的な embedded 利用。WAL は async sync で、component は通常の default set を使います。 |
+| `DURABLE` | startup/write speed より durability を優先したい場合。WAL は sync、VersionLog は有効です。 |
 
 正確な低レベル option への展開は engine 層の責務です。明示的に制御したい場合は `AkkaraDB::Options::overrides` を使います。
+
+`AkkaraDB::Options::overrides` では、per-shard memtable threshold、VersionLog、SST codec、blob codec、blob threshold、SST read promotion、Bloom filter bits per key、max L0 SST files を上書きできます。`Options::api` は API server の backend、port、transport、TLS/PSK、HTTP、TCP、gRPC の limit を下層 engine options に渡します。
 
 ## Entity を定義する
 
@@ -72,6 +74,25 @@ auto profiles = db->table<&Profile::id>("profiles");
 | query proxy fields | `table.query([](auto row) { ... })` の中で field を参照するために使います。 |
 
 `Ref<T>` traits が不要で、query 用の field だけを登録したい場合は `AKKARADB_QUERYABLE(Type, ...)` を使います。
+
+### BinPack の対応形
+
+entity は BinPack で encode されます。aggregate struct は Boost.PFR で宣言順に field を encode するため、storage compatibility は field order と型 layout に依存します。
+
+| Shape | Notes |
+|---|---|
+| `bool`、signed/unsigned integer、`float`、`double` | built-in adapter があります。 |
+| `enum` | underlying integer type で encode されます。 |
+| `std::string`、`std::string_view` | `string_view` adapter は write-only です。保存値を読む用途では owning string を使います。 |
+| `std::vector<T>`、`std::vector<uint8_t>`、`std::array<T, N>` | element にも adapter が必要です。 |
+| `std::map<K, V>`、`std::unordered_map<K, V>` | key/value にも adapter が必要です。 |
+| `std::optional<T>` | presence byte と、値がある場合の value を encode します。 |
+| `std::pair<A, B>`、`std::tuple<Ts...>` | 要素順に encode します。 |
+| aggregate struct | trivially copyable aggregate は memcpy fast path、それ以外は field-by-field です。 |
+| `akkaradb::Ref<T>` | referenced row id を encode します。 |
+| `akkaradb::Immutable<T>` | wrapped value を encode し、decode 時は sealed value として戻ります。 |
+
+data が存在した後の field order、field type、table name の変更は storage migration として扱います。
 
 ## 基本操作
 
@@ -222,7 +243,7 @@ query proxy は `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で生成され
 
 ### index を使う計画
 
-planner は、登録済み index を使える predicate を探します。等価条件と一部の `in` は index scan の起点になり、その後も完全な式で filter されます。index を使えない predicate は table range scan に fallback します。
+planner は、登録済み index を使える predicate を探します。返す前には常に完全な式で filter されるため、index は candidate set を狭める役割です。
 
 ```cpp
 auto result = profiles.query([](auto profile) {
@@ -231,6 +252,21 @@ auto result = profiles.query([](auto profile) {
 ```
 
 この例では `email` index があれば scan の起点になり、`age >= 18` は残りの filter として評価されます。
+
+| Predicate shape | Indexed plan behavior |
+|---|---|
+| `field == literal` | field index の equality range。 |
+| `field != literal` | field index 全体を scan し、expression で filter。 |
+| numeric `field >/>=/</<= literal` | `bool` 以外の arithmetic field では ordered index range。 |
+| `field.in(values)` | value ごとの equality range。candidate primary key は dedupe されます。 |
+| `field.notIn(values)` | field index 全体を scan し、expression で filter。 |
+| optional `field.isNull()` | empty optional の encoded value に対する equality range。 |
+| optional `field.isNotNull()` | field index 全体を scan し、expression で filter。 |
+| string `startsWith`、`contains` | 現在の実装では field index 全体を scan し、expression で filter。 |
+| string `like("exact")` | equality range。 |
+| string `like("prefix%")` | 現在の実装では field index 全体を scan し、expression で filter。 |
+| `&&` の中の predicate | planner が使える indexed side を選ぶことがあります。 |
+| `||`、nested field、map lookup | 正しく評価されますが、別の usable indexed predicate がない限り table scan fallback です。 |
 
 ## optional / nested / map field
 
@@ -366,11 +402,27 @@ schema.foreignKey<&PlainPost::authorId, &Author::id>(
 
 delete 用に 1 つ、update 用に 1 つだけ action を選べます。`SetNull` には nullable source field が必要です。foreign key は native constraint subsystem ではなく、table hook と scan で実装されています。
 
+target field が target table の主キーではない場合、`foreignKey<FieldPtr, TargetFieldPtr>()` は target field の index を登録し、存在確認に indexed lookup を使います。delete / update action は、それでも referencing row を見つけるために source table を scan します。`Ref<T>` field では delete action は target primary key 前提で、update action は row id が安定しているため実質 skip されます。
+
 ## VersionLog との関係
 
 Native 高レベル API の typed data は、低レベル API と同じ engine key space に保存されます。下層 engine で VersionLog が有効なら、typed row も最終的には engine key/value write なので、同じ version history の対象になります。
 
-正確な historical read API は、対象 version の `PackedTable` header を確認してください。この tree で見えている高レベル API は、現在 row の CRUD、row-id lookup、scan、query、schema 動作を公開しており、rollback 自体は下層 engine 側で制御されます。
+この C++ high-level header が現在公開しているのは、current-row CRUD、row-id lookup、scan、query、index、ref、join、schema 動作です。`PackedTable` には typed `getAt()` や typed `history()` helper は見えていないため、明示的な historical read や rollback control が必要な場合は `db->engine()` から低レベルの VersionLog API を使います。
+
+## よくある失敗
+
+| 症状 | よくある原因 |
+|---|---|
+| `findBy<&Field>()` が throw する | `index<&Field>()` または `indexed<&Field>()` で field index を登録していない。 |
+| 新しく登録した index が古い row を見つけない | index registration は既存 row を backfill しません。index 登録後に row を rewrite / rebuild します。 |
+| `Ref<T>` が resolve できない | ref が detached、target table が schema/binding に登録されていない、または target row が削除されています。 |
+| `foreignKey<&RefField>()` が target table not registered で失敗する | schema に referenced entity table が含まれていません。 |
+| `SetNull` setup が失敗する | source field が `std::optional<T>` ではありません。 |
+| `updatePrimaryKey()` が destination exists で失敗する | 新しい主キーが既に存在します。 |
+| 読み込んだ `Immutable<T>` field の代入が失敗する | decode または persist 後に value が sealed されています。 |
+| table rename 後に data が見えない | table name は hashed storage prefix の一部です。 |
+| struct change 後に decode 前提が崩れる | BinPack aggregate encoding は field order と compatible field type に依存します。 |
 
 ## 最初の使い方
 

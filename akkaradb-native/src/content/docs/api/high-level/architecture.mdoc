@@ -16,6 +16,8 @@ The native high-level API is a header-driven C++ layer over `AkkEngine`. It does
 | `Ref<T>` | Stores a key, row id, or loaded entity and resolves through table bindings. |
 | `Schema` | Registers table holders and installs hook-based foreign-key actions. |
 
+`AkkaraDB::open()` builds `engine::AkkEngineOptions` from the high-level options object. The wrapper does not hide the engine: `db->engine()` returns the underlying engine for low-level operations that are not surfaced by `PackedTable`.
+
 ## Layering
 
 | Layer | What happens there |
@@ -54,7 +56,9 @@ The primary key type is inferred from the member pointer passed to `PackedTable`
 auto users = db->table<&User::id>("users");
 ```
 
-Numeric keys are encoded so lexicographic byte order matches numeric order. Other supported values use BinPack encoding. The encoded primary key is appended to the table prefix for row keys and to metadata prefixes for row-id mappings.
+Numeric keys are encoded so lexicographic byte order matches numeric order. Signed integers flip the sign bit and then write big-endian bytes; unsigned integers are written big-endian. Other supported values use BinPack encoding. The encoded primary key is appended to the table prefix for row keys and to metadata prefixes for row-id mappings.
+
+Index field encoding follows the same idea for ordered field types: integral values and floating-point values are converted to sortable bytes, `Immutable<T>` indexes the wrapped value, and `Ref<T>` indexes the referenced row id. Other field values use BinPack.
 
 ## Write Path
 
@@ -137,6 +141,8 @@ Supported expression families include:
 
 The planner can use registered indexes for suitable predicates. The returned rows are still filtered by the complete expression, so an index narrows the candidate set without changing query semantics.
 
+The planner recursively searches `AND` expressions for a usable indexed predicate. It can create equality ranges, ordered numeric ranges, multiple `IN` ranges, null ranges for optional fields, or a full field-index scan for predicates such as `!=`, `notIn`, `isNotNull`, `contains`, and some `like` forms. `OR` is evaluated correctly but does not currently become a multi-index union plan by itself.
+
 ## Row-Id Metadata
 
 Each table keeps stable row ids separate from visible primary keys.
@@ -189,6 +195,8 @@ Each join row contains the left `Entry` and the decoded right entity. `where()`,
 
 Foreign-key actions scan source tables to find referencing rows. For large tables, use an explicit index or application-level lookup structure when reference checks need to be fast.
 
+Target existence checks are more precise than the action scans: when a foreign key points at a non-primary target field, the target table registers an index for that field and uses indexed lookup for validation. Source-side delete/update actions still walk the source table and compare fields. For `Ref<T>` source fields, target lookup is row-id based and update actions are skipped because the row id remains stable across primary-key changes.
+
 ## Consistency Boundary
 
 The high-level API is intentionally thin over the engine. A single `PackedTable` operation may write the entity, row-id metadata, and index keys. Schema actions may write multiple rows. Joins may observe current state through scans and lookups.
@@ -207,6 +215,8 @@ Backups must keep table rows and table metadata together.
 | VersionLog data | Required if the engine is configured for historical reads or rollback. |
 
 Migration tooling should treat table name, primary-key type, indexed fields, and struct encoding as storage layout decisions.
+
+Because BinPack encodes aggregate fields in declaration order, adding, removing, reordering, or changing fields is not automatically a compatible schema change. Plan these as explicit rewrites or versioned entity formats.
 
 ## When To Use Low-Level API
 
