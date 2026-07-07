@@ -1,13 +1,13 @@
 ---
 title: Ref と Join
-description: row-id reference、lazy resolution、dirty ref flush、typed join view。
+description: 行 ID 参照、遅延解決、dirty ref、型付き結合ビュー。
 ---
 
-`Ref<T>` は高レベル API の reference type です。別 entity を stable row id または primary key で解決するための情報を持ち、table binding 経由で referenced value を lazy load できます。
+`Ref<T>` は高レベル API の参照型です。別のエンティティを、安定した行 ID または主キーで解決するための情報を持ち、テーブルの接続情報を通して参照先を遅延読み込みできます。
 
-## reference traits
+## 参照用 trait
 
-参照される型には `RefTraits<T>` が必要です。`AKKARADB_ENTITY` が生成します。
+参照される型には `RefTraits<T>` が必要です。これは `AKKARADB_ENTITY` が生成します。
 
 ```cpp
 struct Author {
@@ -18,7 +18,7 @@ struct Author {
 AKKARADB_ENTITY(Author, id, name);
 ```
 
-## reference を保存する
+## 参照を保存する
 
 ```cpp
 struct Post {
@@ -33,38 +33,38 @@ authors.put({1, "Alice"});
 posts.put({100, akkaradb::ref<Author>(1), "Hello"});
 ```
 
-table または schema が `Author` の binding を持っていると、ref は lazy に解決できます。
+テーブルまたはスキーマが `Author` の接続情報を持っていれば、`Ref` は必要になった時点で参照先を解決できます。
 
 ```cpp
 auto post = posts.get(100);
 auto name = post->author->name;
 ```
 
-## ref states
+## 参照の状態
 
-| State | Meaning |
+| 状態 | 意味 |
 |---|---|
-| key known | `id()` が row-id lookup なしで返せます。 |
-| row id known | `rowId()` が返せる、または metadata 経由で解決できます。 |
-| loaded | `operator->` と `operator*` で value にアクセスできます。 |
-| dirty | owner を保存する前に referenced value を write する必要があります。 |
-| attached | lazy resolution 用の table binding があります。 |
+| キーが分かっている | `id()` をテーブル検索なしで返せます。 |
+| 行 ID が分かっている | `rowId()` を返せます。必要なら行 ID の対応表から現在の主キーを解決します。 |
+| 読み込み済み | `operator->` と `operator*` で参照先の値へアクセスできます。 |
+| dirty | owner を保存する前に、参照先の値も保存する必要があります。 |
+| 接続済み | 遅延解決に使うテーブル接続情報を持っています。 |
 
-full entity から `Ref<T>` を作ると dirty になります。`PackedTable::put()` は owner entity を書く前に dirty ref を flush します。
+完全なエンティティから `Ref<T>` を作ると、参照は dirty になります。`PackedTable::put()` は owner のエンティティを書き込む前に、dirty な参照先を保存します。
 
-## primary-key change
+## 主キーの変更
 
-table は `pk2row` と `row2pk` metadata を維持するため、ref は primary-key change をまたいで安定します。
+テーブルは `pk2row` と `row2pk` の対応表を維持するため、`Ref` は主キーの変更をまたいでも安定します。
 
 ```cpp
 authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
 ```
 
-既存の `Ref<Author>` は visible primary key が変わった後も row id 経由で解決できます。
+既存の `Ref<Author>` は、見えている主キーが変わった後も行 ID 経由で解決できます。
 
-## joins
+## 結合
 
-join は scan と lookup の上にある typed read view です。
+結合は、スキャンと検索の上にある型付きの読み取りビューです。
 
 ```cpp
 auto rows = posts
@@ -75,18 +75,18 @@ auto rows = posts
     .toVector();
 ```
 
-plain-field join では左右の member pointer を指定します。
+通常フィールド同士で結合する場合は、左右のメンバポインタを指定します。
 
 ```cpp
 auto rows = posts.join<&PlainPost::authorId, &Author::id>(authors).toVector();
 ```
 
-## execution shape
+## 実行の形
 
-| Join form | Cost shape |
+| 結合形式 | 実行の形 |
 |---|---|
-| `join<&RefField>(right)` | left scan + right row-id lookup。 |
-| `join<&LeftField, &RightPk>(right)` | left scan + right primary-key lookup。 |
-| `join<&LeftField, &RightField>(right)` | left scan + matching field のための right scan。 |
+| `join<&RefField>(right)` | 左テーブルをスキャンし、右テーブルを行 ID で検索します。 |
+| `join<&LeftField, &RightPk>(right)` | 左テーブルをスキャンし、右テーブルを主キーで検索します。 |
+| `join<&LeftField, &RightField>(right)` | 左テーブルをスキャンし、対応する値を探すために右テーブルもスキャンします。 |
 
-join helper は native join plan を作りません。large relation-heavy workload では、explicit index や application-level materialized view を設計します。
+結合ヘルパーは専用の結合実行計画を作るものではありません。大量の関連データを頻繁に読む場合は、明示的なインデックスやアプリケーション側の読み取り用テーブルを設計します。

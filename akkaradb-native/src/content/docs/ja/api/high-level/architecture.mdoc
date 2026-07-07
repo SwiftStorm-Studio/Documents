@@ -1,114 +1,114 @@
 ---
 title: 高レベル API のアーキテクチャ
-description: Native C++ の typed table API が struct を AkkEngine storage に対応させる仕組み。
+description: Native C++ の型付きテーブル API が、構造体を AkkEngine のストレージ形式へ対応させる仕組み。
 ---
 
-Native 高レベル API は、`AkkEngine` の上にある header-driven な C++ 層です。別の storage engine を作るわけではありません。決定的な table prefix を作り、struct を BinPack で encode し、row-id metadata を管理し、永続化は byte-oriented な engine に委譲します。
+Native の高レベル API は、`AkkEngine` の上にある C++ 向けの薄い層です。別のストレージエンジンを作るのではなく、決定的なテーブル接頭辞を作り、構造体を `BinPack` でエンコードし、行 ID のメタデータを管理し、永続化はバイト列指向のエンジンへ委譲します。
 
-## runtime parts
+## 実行時の部品
 
-| Part | Responsibility |
+| 部品 | 役割 |
 |---|---|
-| `AkkaraDB` | `engine::AkkEngine` を所有し、`table<&T::id>()` と schema 登録を提供します。 |
-| `PackedTable<PrimaryKeyPtr>` | typed operation を engine key、value、scan、metadata write に変換します。 |
-| `BinPack` | primary key、entity、index value、ref、optional value、map、nested struct を encode / decode します。 |
-| `AKKARADB_ENTITY` | C++ struct の `RefTraits` と query proxy field を登録します。 |
-| `Ref<T>` | key、row id、loaded entity を保持し、table binding 経由で解決します。 |
-| `Schema` | table holder を登録し、hook ベースの foreign-key action を設定します。 |
+| `AkkaraDB` | `engine::AkkEngine` を所有し、`table<&T::id>()` とスキーマ登録を提供します。 |
+| `PackedTable<PrimaryKeyPtr>` | 型付きの操作を、エンジンキー、値、スキャン、メタデータ書き込みへ変換します。 |
+| `BinPack` | 主キー、エンティティ、インデックス値、参照、optional 値、map、入れ子の構造体をエンコード / デコードします。 |
+| `AKKARADB_ENTITY` | C++ 構造体の `RefTraits` とクエリ用フィールドを登録します。 |
+| `Ref<T>` | キー、行 ID、読み込み済みエンティティを保持し、テーブル接続情報を通して解決します。 |
+| `Schema` | テーブルホルダを登録し、フックによる外部キー動作を設定します。 |
 
-`AkkaraDB::open()` は high-level options object から `engine::AkkEngineOptions` を作ります。wrapper は engine を隠しません。`db->engine()` から下層 engine に触れるため、`PackedTable` が公開していない低レベル操作も必要に応じて使えます。
+`AkkaraDB::open()` は高レベル用のオプションから `engine::AkkEngineOptions` を作ります。ラッパーはエンジンを隠しません。`db->engine()` から下層のエンジンに触れられるため、`PackedTable` が公開していない低レベル操作も必要に応じて使えます。
 
-## layering
+## 層の分担
 
-| Layer | What happens there |
+| 層 | そこで行うこと |
 |---|---|
-| Application C++ | `AkkaraDB`、`PackedTable`、query expression、ref、join、schema hook を呼びます。 |
-| Native high-level API | struct を encode し、table / index / metadata key を作り、row-id mapping を管理し、hook を実行します。 |
-| `AkkEngine` | bytes、WAL record、memtable、SSTable、blob、VersionLog data、必要なら server / cluster component を扱います。 |
+| アプリケーションの C++ | `AkkaraDB`、`PackedTable`、クエリ式、参照、結合、スキーマフックを呼びます。 |
+| Native 高レベル API | 構造体をエンコードし、テーブル / インデックス / メタデータのキーを作り、行 ID の mapping を管理し、フックを実行します。 |
+| `AkkEngine` | バイト列、WAL レコード、MemTable、SSTable、Blob、VersionLog のデータ、必要なら API サーバーやクラスタ部品を扱います。 |
 
-高レベル API の durability、compaction、blob、VersionLog、API server、cluster の挙動は、設定された `AkkEngine` から引き継がれます。
+高レベル API の永続性、コンパクション、Blob、VersionLog、API サーバー、クラスタの挙動は、設定された `AkkEngine` から引き継がれます。
 
-## table namespace
+## テーブル名前空間
 
-各 table name は 8-byte prefix に変換されます。row は次の形で保存されます。
+各テーブル名は 8 バイトの接頭辞に変換されます。行は次の形で保存されます。
 
 ```text
 [tablePrefix][encodedPrimaryKey]
 ```
 
-table は table name から派生した metadata prefix も所有します。
+テーブルは、テーブル名から派生したメタデータ接頭辞も所有します。
 
-| Prefix purpose | Used for |
+| 接頭辞の用途 | 使い道 |
 |---|---|
-| table rows | encode された entity value。 |
-| `idx:<field>` | 登録済み field の secondary index entries。 |
-| `pk2row` | primary key から stable row id への mapping。 |
-| `row2pk` | stable row id から現在の primary key への mapping。 |
-| `nextrow` | row-id allocation counter。 |
+| テーブル行 | エンコード済みのエンティティ値。 |
+| `idx:<field>` | 登録済みフィールドのセカンダリインデックス項目。 |
+| `pk2row` | 主キーから安定した行 ID への対応表。 |
+| `row2pk` | 安定した行 ID から現在の主キーへの対応表。 |
+| `nextrow` | 次の行 ID を割り当てるためのカウンタ。 |
 
-table name は物理的な storage layout の一部です。table name を変えると、API は別の key range を見ることになります。
+テーブル名は物理的なストレージレイアウトの一部です。テーブル名を変えると、API は別のキー範囲を見ることになります。
 
-## primary-key encoding
+## 主キーのエンコード
 
-primary key type は `PackedTable` に渡した member pointer から推論されます。
+主キー型は、`PackedTable` に渡したメンバポインタから推論されます。
 
 ```cpp
 auto users = db->table<&User::id>("users");
 ```
 
-数値 key は、lexicographic byte order が numeric order と一致するように encode されます。signed integer は sign bit を flip してから big-endian bytes にし、unsigned integer は big-endian で書きます。それ以外の対応済み value は BinPack encoding を使います。encoded primary key は row key では table prefix に、row-id metadata では metadata prefix に追加されます。
+数値キーは、辞書順のバイト比較が数値順と一致するようにエンコードされます。signed integer は sign bit を反転してから big-endian bytes にし、unsigned integer は big-endian で書きます。それ以外の対応済み値は `BinPack` のエンコードを使います。エンコード済み主キーは、行キーではテーブル接頭辞に、行 ID メタデータではメタデータ接頭辞に追加されます。
 
-index field encoding も ordered field type では同じ考え方です。integral value と floating-point value は sortable bytes に変換され、`Immutable<T>` は wrapped value、`Ref<T>` は referenced row id を index します。それ以外の field value は BinPack を使います。
+インデックス対象フィールドのエンコードも、順序付きフィールド型では同じ考え方です。整数と浮動小数点値は並び順を保つバイト列へ変換され、`Immutable<T>` は包んでいる値、`Ref<T>` は参照先の行 ID をインデックス化します。それ以外のフィールド値は `BinPack` を使います。
 
-## write path
+## 書き込み経路
 
-`put(entity)` は、下層 engine write の前後で次の処理を行います。
+`put(entity)` は、下層エンジンへの書き込みの前後で次の処理を行います。
 
-1. temporary arena-backed buffer を reset する。
-2. `entity.*PrimaryKeyPtr` から primary key を取り出す。
-3. table row key を作る。
-4. hook や index が必要なら以前の entity を読む。
-5. replacement の場合、update hook と immutable-field check を実行する。
-6. `Ref<T>` field を attach し、dirty ref を flush する。
-7. 登録済み foreign key を validate する。
-8. entity を BinPack で encode する。
-9. `AkkEngine` に key/value を書く。
-10. stable row id を allocate または reuse する。
-11. row-id metadata を更新する。
-12. secondary index entry を再構築する。
+1. 一時バッファをリセットする。
+2. `entity.*PrimaryKeyPtr` から主キーを取り出す。
+3. テーブル行キーを作る。
+4. フックやインデックスが必要なら以前のエンティティを読む。
+5. 置換の場合、更新フックと変更不可フィールドの検査を実行する。
+6. `Ref<T>` フィールドを接続し、dirty ref を保存する。
+7. 登録済みの外部キーを検証する。
+8. エンティティを `BinPack` でエンコードする。
+9. `AkkEngine` にキー / 値を書き込む。
+10. 安定した行 ID を割り当て、または再利用する。
+11. 行 ID のメタデータを更新する。
+12. セカンダリインデックス項目を再構築する。
 
-これは 1 つの logical table write の周辺で複数の engine operation を行います。高レベル API は `AkkEngine` の上に multi-row transaction manager を追加しません。
+これは 1 つの論理的なテーブル書き込みの周辺で、複数のエンジン操作を行います。高レベル API は `AkkEngine` の上に複数行トランザクション管理を追加しません。
 
-## read path
+## 読み取り経路
 
-`get(pk)` は同じ namespaced key を作り、`AkkEngine` から value bytes を読みます。`getInto(pk, out)` は既存 object に直接 decode します。
+`get(pk)` は同じ名前空間付きキーを作り、`AkkEngine` から値のバイト列を読みます。`getInto(pk, out)` は既存オブジェクトに直接デコードします。
 
-decode 後、table は ref binding を attach し、immutable field を seal します。これにより、読み込まれた `Ref<T>` field は table schema 経由で解決でき、読み込まれた `Immutable<T>` field は accidental mutation を拒否できます。
+デコード後、テーブルは参照の接続情報を取り付け、immutable field を seal します。これにより、読み込まれた `Ref<T>` フィールドはテーブルスキーマ経由で解決でき、読み込まれた `Immutable<T>` フィールドは意図しない変更を拒否できます。
 
-## scans
+## スキャン
 
-`scanAll()` は table prefix の start/end range を作り、engine scan result を走査します。返ってきた key は table prefix と一致するか確認され、primary-key suffix は `Entry::id` に、value bytes は `Entry::value` に decode されます。
+`scanAll()` はテーブル接頭辞の開始 / 終了範囲を作り、エンジンのスキャン結果を走査します。返ってきたキーはテーブル接頭辞と一致するか確認され、主キー部分は `Entry::id` に、値のバイト列は `Entry::value` にデコードされます。
 
-`scan(startPk, endPk)` は encoded primary key から正確な key boundary を作ります。数値 key は sortable なので、numeric range scan は自然な数値順になります。
+`scan(startPk, endPk)` はエンコード済み主キーから正確なキー範囲を作ります。数値キーは並び順を保つため、数値範囲スキャンは自然な数値順になります。
 
-## secondary indexes
+## セカンダリインデックス
 
-`index<&Field>()` は field 用の `IndexDef` を登録し、`Index<FieldPtr>` object を返します。
+`index<&Field>()` はフィールド用の `IndexDef` を登録し、`Index<FieldPtr>` オブジェクトを返します。
 
-index entry には candidate primary-key bytes を見つけるための情報が保存されます。`Index::find(value)` は encoded field value の index prefix を scan し、index key から primary-key bytes を取り出し、primary key で現在の entity を読みます。
+インデックス項目には、候補となる主キーのバイト列を見つけるための情報が保存されます。`Index::find(value)` は、エンコード済みフィールド値のインデックス接頭辞をスキャンし、インデックスキーから主キーのバイト列を取り出し、主キーで現在のエンティティを読みます。
 
-| Operation | Index maintenance |
+| 操作 | インデックスの保守 |
 |---|---|
-| `put()` insert | entity write 後に index entry を書きます。 |
-| `put()` replacement | 古い index entry を消してから新しい entry を書きます。 |
-| `remove()` | row metadata を消す前に古い index entry を消します。 |
-| `updatePrimaryKey()` | 新しい index entry を書き、古い primary-key entry を消します。 |
+| `put()` による挿入 | エンティティを書き込んだ後にインデックス項目を書きます。 |
+| `put()` による置換 | 古いインデックス項目を消してから新しい項目を書きます。 |
+| `remove()` | 行メタデータを消す前に古いインデックス項目を消します。 |
+| `updatePrimaryKey()` | 新しいインデックス項目を書き、古い主キー項目を消します。 |
 
-index の自動 backfill はありません。既存 row を index に反映したい場合は、application 側で row を rewrite します。
+インデックスの自動バックフィルはありません。既存行をインデックスに反映したい場合は、アプリケーション側で行を書き直します。
 
-## query model
+## クエリモデル
 
-C++ query API は、overloaded operator と field proxy object で expression type を組み立てます。
+C++ のクエリ API は、演算子のオーバーロードとフィールドプロキシで式の型を組み立てます。
 
 ```cpp
 profiles.query([](auto profile) {
@@ -116,108 +116,106 @@ profiles.query([](auto profile) {
 });
 ```
 
-`AKKARADB_QUERYABLE` は entity 用の `akkaradbQueryProxy()` overload を作ります。`query()` は predicate にその proxy を渡し、返ってきた expression tree を `QueryView` に保持します。
+`AKKARADB_QUERYABLE` はエンティティ用の `akkaradbQueryProxy()` オーバーロードを作ります。`query()` は述語にそのプロキシを渡し、返ってきた式ツリーを `QueryView` に保持します。
 
-対応している expression family は次の通りです。
+対応している式は次の通りです。
 
-| Expression | Internal shape |
+| 式 | 内部の形 |
 |---|---|
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | `Compare<Op, L, R>` |
-| `&&`, `||`, `!` | logical expression types。 |
-| `in`, `notIn` | list membership comparisons。 |
-| `startsWith`, `contains`, `like` | string-oriented comparisons。 |
-| `isNull`, `isNotNull` | optional/null checks。 |
-| `field<&Nested::x>()` | nested field path。 |
-| `get(key)` / `mapGet(key)` | map lookup expression。 |
+| `&&`, `||`, `!` | 論理式。 |
+| `in`, `notIn` | リスト内に含まれるかどうかの比較。 |
+| `startsWith`, `contains`, `like` | 文字列向けの比較。 |
+| `isNull`, `isNotNull` | optional / null の確認。 |
+| `field<&Nested::x>()` | 入れ子フィールドへのパス。 |
+| `get(key)` / `mapGet(key)` | map からの値取得式。 |
 
-## query planning
+## クエリ計画
 
-`QueryView::begin()` は `PackedTable` に `QueryPlan` を作らせます。plan は次のどちらかを選びます。
+`QueryView::begin()` は `PackedTable` に `QueryPlan` を作らせます。計画は次のどちらかを選びます。
 
-| Source | Behavior |
+| 取得元 | 挙動 |
 |---|---|
-| `TABLE` | table key range を scan し、各 row に expression を評価します。 |
-| `INDEX` | 1 つ以上の index range を scan し、candidate row を primary key で読み、必要なら dedupe してから完全な expression を評価します。 |
+| `TABLE` | テーブルのキー範囲をスキャンし、各行に式を評価します。 |
+| `INDEX` | 1 つ以上のインデックス範囲をスキャンし、候補行を主キーで読み、必要なら重複排除してから完全な式を評価します。 |
 
-planner は、登録済み index を使える predicate を探します。返される row は常に完全な expression で filter されるため、index は candidate set を狭める役割です。
+計画器は、登録済みインデックスを使える述語を探します。返される行は常に完全な式で絞り込まれるため、インデックスは候補集合を狭める役割です。
 
-planner は `AND` expression の中を再帰的に探し、使える indexed predicate を見つけます。equality range、numeric ordered range、複数の `IN` range、optional field の null range、または `!=`、`notIn`、`isNotNull`、`contains`、一部の `like` のような full field-index scan を作れます。`OR` は正しく評価されますが、現状それ単体で multi-index union plan にはなりません。
+計画器は `AND` 式の中を再帰的に探し、使えるインデックス付き述語を見つけます。等価範囲、数値の順序付き範囲、複数の `IN` 範囲、optional フィールドの null 範囲、または `!=`、`notIn`、`isNotNull`、`contains`、一部の `like` のようなフィールドインデックス全体のスキャンを作れます。`OR` は正しく評価されますが、現状それ単体では複数インデックスの union plan にはなりません。
 
-## row-id metadata
+## 行 ID メタデータ
 
-各 table は、見えている primary key とは別に stable row id を持ちます。
+各テーブルは、見えている主キーとは別に安定した行 ID を持ちます。
 
-| Metadata | Purpose |
+| メタデータ | 目的 |
 |---|---|
-| `pk2row` | primary key から stable row id を解決します。 |
-| `row2pk` | row id から現在の primary key を解決します。 |
-| `nextrow` | 次の row id を allocate します。 |
+| `pk2row` | 主キーから安定した行 ID を解決します。 |
+| `row2pk` | 行 ID から現在の主キーを解決します。 |
+| `nextrow` | 次の行 ID を割り当てます。 |
 
-`updatePrimaryKey()` は row id を保ったまま mapping を書き換えます。これにより `Ref<T>` は primary-key change をまたいで解決できます。
+`updatePrimaryKey()` は行 ID を保ったまま対応表を書き換えます。これにより `Ref<T>` は主キー変更をまたいで解決できます。
 
-## references
+## 参照
 
-`Ref<T>` は known primary key、known row id、loaded value、dirty value を保持できます。解決は `RefBinding<T>` 経由で遅延実行されます。
+`Ref<T>` は、既知の主キー、既知の行 ID、読み込み済みの値、dirty な値を保持できます。解決は `RefBinding<T>` を通して遅延実行されます。
 
-| State | Meaning |
+| 状態 | 意味 |
 |---|---|
-| key known | `id()` が table lookup なしで返せます。 |
-| row id known | `rowId()` が row-id metadata 経由で解決できます。 |
-| loaded | `operator->` と `operator*` が entity を返せます。 |
-| dirty | owner write 時に referenced entity を flush する必要があります。 |
-| attached | 解決用の table binding があります。 |
+| キーが分かっている | `id()` をテーブル検索なしで返せます。 |
+| 行 ID が分かっている | 行 ID メタデータ経由で解決できます。 |
+| 読み込み済み | `operator->` と `operator*` がエンティティを返せます。 |
+| dirty | owner の書き込み時に参照先エンティティを保存する必要があります。 |
+| 接続済み | 解決用のテーブル接続情報があります。 |
 
-table が entity を decode すると ref binding を attach します。table が entity を write すると owner を encode する前に dirty ref を flush します。
+テーブルがエンティティをデコードすると、参照の接続情報を取り付けます。テーブルがエンティティを書き込むと、owner をエンコードする前に dirty ref を保存します。
 
-## joins
+## 結合
 
-join helper は typed read view であり、native join engine ではありません。
+結合ヘルパーは型付きの読み取りビューであり、専用の結合エンジンではありません。
 
-| Join form | Execution shape |
+| 結合形式 | 実行の形 |
 |---|---|
-| `join<&RefField>(right)` | left table を scan し、right-table row-id lookup で ref を解決します。 |
-| `join<&LeftField, &RightPk>(right)` | left を scan し、right primary-key lookup を行います。 |
-| `join<&LeftField, &RightField>(right)` | left を scan し、matching field を探すために right も scan します。 |
+| `join<&RefField>(right)` | 左テーブルをスキャンし、右テーブルを行 ID で検索して参照を解決します。 |
+| `join<&LeftField, &RightPk>(right)` | 左テーブルをスキャンし、右テーブルを主キーで検索します。 |
+| `join<&LeftField, &RightField>(right)` | 左テーブルをスキャンし、一致するフィールドを探すために右テーブルをスキャンします。 |
 
-各 join row は left `Entry` と decode 済み right entity を持ちます。`where()`、`first()`、`any()`、`count()`、`toVector()` は view 上で評価されます。
+各結合行は、左側の `Entry` とデコード済みの右側エンティティを持ちます。`where()`、`first()`、`any()`、`count()`、`toVector()` はビュー上で評価されます。
 
-## schema hooks
+## スキーマフック
 
-`AkkaraDB::Schema` は C++ entity type を key にして table holder を保持します。また、登録済み table 間で `Ref<T>` field を解決するための ref binding も提供します。
+`AkkaraDB::Schema` は C++ のエンティティ型をキーにしてテーブルホルダを保持します。また、登録済みテーブル間で `Ref<T>` フィールドを解決するための接続情報も提供します。
 
-`foreignKey()` は source table または target table に hook を追加して動作します。
+`foreignKey()` は参照元テーブルまたは参照先テーブルにフックを追加して動作します。
 
-| Hook area | Purpose |
+| フック対象 | 目的 |
 |---|---|
-| Source `put()` | 存在しない target への参照を拒否します。 |
-| Target `remove()` | `Restrict`、`Cascade`、`SetNull` を delete に適用します。 |
-| Target primary-key update | key movement に対して `Restrict`、`Cascade`、`SetNull` を適用します。 |
+| 参照元の `put()` | 存在しない参照先への参照を拒否します。 |
+| 参照先の `remove()` | 削除時に `Restrict`、`Cascade`、`SetNull` を適用します。 |
+| 参照先の主キー更新 | キー移動時に `Restrict`、`Cascade`、`SetNull` を適用します。 |
 
-foreign-key action は referencing row を見つけるために source table を scan します。大きい table で高速な reference check が必要な場合は、明示的な index や application-level lookup structure を用意します。
+外部キー動作は、参照している行を見つけるために参照元テーブルをスキャンします。大きいテーブルで高速な参照検査が必要な場合は、明示的なインデックスやアプリケーション側の検索構造を用意します。
 
-target existence check は action scan より具体的です。foreign key が non-primary target field を指す場合、target table はその field の index を登録し、validation に indexed lookup を使います。source-side delete/update action は引き続き source table を scan して field を比較します。`Ref<T>` source field では target lookup は row-id based で、primary-key change をまたいでも row id が安定しているため update action は skip されます。
+## 一貫性の境界
 
-## consistency boundary
+高レベル API はエンジンの上にある薄い層です。1 つの `PackedTable` 操作でも、エンティティ、行 ID メタデータ、インデックスキーを複数回書く場合があります。スキーマ動作は複数行を書く場合があります。結合はスキャンと検索で現在の状態を読みます。
 
-高レベル API は engine の上にある薄い層です。1 つの `PackedTable` operation でも、entity、row-id metadata、index key を複数回書く場合があります。schema action は複数 row を書く場合があります。join は scan と lookup で現在状態を読みます。
+複数行にまたがる all-or-nothing な不変条件が必要な場合は、テーブル API の上に明示的な調整層を作るか、不変条件を 1 つの保存値の中へ閉じ込める設計にします。
 
-all-or-nothing な multi-row invariant が必要な場合は、table API の上に明示的な coordination layer を作るか、invariant を 1 つの stored value の中に閉じ込める設計にします。
+## バックアップと移行
 
-## backup と migration
+バックアップでは、テーブル行とテーブルメタデータを一緒に保持する必要があります。
 
-backup では table row と table metadata を一緒に保持する必要があります。
-
-| Data | Why |
+| データ | 理由 |
 |---|---|
-| Engine files | 実際の stored rows、WAL/SST/blob state、low-level metadata。 |
-| Row-id mappings | `Ref<T>`、`getByRowId()`、`updatePrimaryKey()` の安定性に必要です。 |
-| Index entries | `Index::find()` と indexed query planning に必要です。 |
-| VersionLog data | engine が historical read や rollback を使う設定なら必要です。 |
+| エンジンファイル | 実際の保存行、WAL / SST / Blob の状態、低レベルのメタデータを含みます。 |
+| 行 ID の対応表 | `Ref<T>`、`getByRowId()`、`updatePrimaryKey()` の安定性に必要です。 |
+| インデックス項目 | `Index::find()` とインデックス付きクエリ計画に必要です。 |
+| VersionLog のデータ | エンジンの過去時点読み取りやロールバックを使う設定なら必要です。 |
 
-migration tooling では、table name、primary-key type、indexed fields、struct encoding を storage layout decision として扱います。
+移行用の道具では、テーブル名、主キー型、インデックス対象フィールド、構造体のエンコードをストレージレイアウトの決定として扱います。
 
-BinPack は aggregate field を declaration order で encode するため、field の追加、削除、並べ替え、型変更は自動互換な schema change ではありません。明示的な rewrite または versioned entity format として計画します。
+`BinPack` は集約型フィールドを宣言順でエンコードするため、フィールドの追加、削除、並べ替え、型変更は自動互換なスキーマ変更ではありません。明示的な書き換え、またはバージョン付きエンティティ形式として設計します。
 
-## low-level API に降りる場合
+## 低レベル API に降りる場合
 
-byte layout を完全に制御したい場合、custom protocol / server layer を作る場合、struct 以外の encoding を使う場合、大量データの storage surgery をする場合、engine subsystem を直接検証する場合は `engine::AkkEngine` を使います。typed struct、table-local index、query expression、ref、schema hook が主な価値なら高レベル API を使います。
+バイト列のレイアウトを完全に制御したい場合、独自の通信方式やサーバー層を作る場合、構造体以外のエンコードを使う場合、大量データのストレージを直接修復する場合、エンジン内部を直接検証する場合は `engine::AkkEngine` を使います。型付き構造体、テーブル単位のインデックス、クエリ式、参照、スキーマフックが主な価値なら高レベル API を使います。

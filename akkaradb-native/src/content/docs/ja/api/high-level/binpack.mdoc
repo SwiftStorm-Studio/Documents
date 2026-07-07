@@ -1,46 +1,46 @@
 ---
-title: BinPack と Compatibility
-description: 高レベル API の対応 value shape と storage compatibility rules。
+title: BinPack と互換性
+description: 高レベル API が対応する値の形と、ストレージ互換性ルール。
 ---
 
-高レベル table は entity を BinPack で encode します。`PackedTable` は encoded entity を engine value として保存し、table prefix、primary-key bytes、index value、row-id metadata から key を組み立てます。
+高レベル API のテーブルは、エンティティを `BinPack` でエンコードします。`PackedTable` はエンコード済みのエンティティをエンジンの値として保存し、テーブル接頭辞、主キーのバイト列、インデックス値、行 ID のメタデータからキーを組み立てます。
 
-## supported shapes
+## 対応している形
 
-| Shape | Notes |
+| 形 | 補足 |
 |---|---|
-| `bool` | 1 byte で encode。 |
-| signed/unsigned integers | fixed-width adapter。primary key と index では必要に応じて sortable encoding を使います。 |
-| `float`, `double` | fixed-width adapter。index value では sortable floating-point bytes を使います。 |
-| `enum` | underlying integer type で encode。 |
-| `std::string` | length-prefixed bytes。 |
-| `std::string_view` | write adapter only。decode が必要な persisted field には使わない方が安全です。 |
-| `std::vector<T>`, `std::array<T, N>` | element type も supported である必要があります。 |
-| `std::vector<uint8_t>` | length-prefixed byte payload。 |
-| `std::map<K, V>`, `std::unordered_map<K, V>` | key/value type も supported である必要があります。 |
-| `std::optional<T>` | presence byte + value がある場合の encoded value。 |
-| `std::pair<A, B>`, `std::tuple<Ts...>` | element-by-element で encode。 |
-| aggregate structs | trivially copyable aggregate は memcpy fast path。それ以外は Boost.PFR field order。 |
-| `akkaradb::Ref<T>` | referenced row id を encode。 |
-| `akkaradb::Immutable<T>` | wrapped value を encode し、decode 時は sealed。 |
+| `bool` | 1 バイトでエンコードします。 |
+| signed / unsigned integer | 固定幅でエンコードします。主キーとインデックスでは、必要に応じて並び順を保つエンコードを使います。 |
+| `float`, `double` | 固定幅でエンコードします。インデックス値では、範囲スキャン向けに並び順を保つバイト列を使います。 |
+| `enum` | underlying integer type でエンコードします。 |
+| `std::string` | 長さ付きのバイト列としてエンコードします。 |
+| `std::string_view` | 書き込み用のアダプタです。デコードが必要な永続フィールドには使わない方が安全です。 |
+| `std::vector<T>`, `std::array<T, N>` | 要素型が対応済みである必要があります。 |
+| `std::vector<uint8_t>` | 長さ付きのバイト列としてエンコードします。 |
+| `std::map<K, V>`, `std::unordered_map<K, V>` | キー型と値型が対応済みである必要があります。 |
+| `std::optional<T>` | 存在フラグと、値がある場合のエンコード済み値を保存します。 |
+| `std::pair<A, B>`, `std::tuple<Ts...>` | 要素ごとにエンコードします。 |
+| aggregate struct | trivially copyable な集約型は `memcpy` の高速経路を使います。それ以外は Boost.PFR のフィールド順を使います。 |
+| `akkaradb::Ref<T>` | 参照先の行 ID をエンコードします。 |
+| `akkaradb::Immutable<T>` | 包んでいる値をエンコードし、デコード時に immutable value として seal します。 |
 
-## compatibility rules
+## 互換性ルール
 
-BinPack は compact で direct な encoding です。self-describing schema migration format ではありません。
+`BinPack` は小さく直接的なエンコードです。自己記述的なスキーマ移行形式ではありません。
 
-次は storage migration として扱います。
+次の変更はストレージ移行として扱います。
 
-- table rename
-- primary-key type change
-- aggregate の field reorder
-- field type change
-- existing aggregate から field を削除
-- `Ref<T>` target の primary-key model change
-- foreign-key action に関わる optional/null semantics change
+- テーブル名の変更
+- 主キー型の変更
+- 集約型フィールドの並べ替え
+- フィールド型の変更
+- 既存の集約型からのフィールド削除
+- `Ref<T>` 参照先の主キーモデル変更
+- 外部キー動作に関わる optional / null の意味変更
 
-## aggregate layout
+## 集約型のレイアウト
 
-non-trivial aggregate struct では、Boost.PFR が declaration order で field を走査します。
+非 trivial な集約型では、Boost.PFR が宣言順にフィールドを走査します。
 
 ```cpp
 struct UserV1 {
@@ -50,23 +50,23 @@ struct UserV1 {
 };
 ```
 
-途中に field を追加すると、その後ろの byte layout が変わります。persisted data では explicit versioning または controlled rewrite を使います。
+途中にフィールドを追加すると、その後ろのバイト配置が変わります。永続データでは、明示的なバージョン付けか、制御された書き換えを使います。
 
-## index encoding
+## インデックスのエンコード
 
-field index は indexed field value を index key に encode します。numeric / floating-point field は ordered scan のため sortable bytes を使います。`Immutable<T>` は wrapped value、`Ref<T>` は referenced row id を index します。
+フィールドインデックスは、インデックス対象フィールドの値をインデックスキーへエンコードします。数値と浮動小数点のフィールドは、範囲スキャンのために並び順を保つバイト列へ変換されます。`Immutable<T>` は包んでいる値を、`Ref<T>` は参照先の行 ID をインデックス化します。
 
-つまり index compatibility は field の encoded representation に従います。incompatible field change の後は index rebuild が必要です。
+つまり、インデックスの互換性はフィールドのエンコード表現に従います。互換性のないフィールド変更の後は、インデックスの再構築が必要です。
 
-## practical migration pattern
+## 実用的な移行手順
 
-controlled change では次の流れが扱いやすいです。
+制御された変更では、次の流れが扱いやすいです。
 
-1. old struct で old table を開く。
-2. rows を scan する。
-3. 各 row を new struct に変換する。
-4. new table name または temporary database に書く。
-5. converted rows を書く前に index を登録する。
-6. 検証後に application code を切り替える。
+1. 古い構造体で古いテーブルを開く。
+2. 行をスキャンする。
+3. 各行を新しい構造体へ変換する。
+4. 新しいテーブル名、または一時データベースへ書き込む。
+5. 変換済み行を書き込む前にインデックスを登録する。
+6. 検証後にアプリケーションコードを切り替える。
 
-small embedded dataset では、bytes を in-place patch するより full rewrite の方が単純で安全なことが多いです。
+小さな組み込みデータセットでは、保存済みバイト列をその場で修正するより、全件書き換えの方が単純で安全なことが多いです。

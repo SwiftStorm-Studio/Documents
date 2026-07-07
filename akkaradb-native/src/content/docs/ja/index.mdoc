@@ -1,13 +1,11 @@
 ---
 title: AkkaraDB Native
-description: Native C++ documentation for the AkkaraDB storage engine and typed table API.
+description: AkkaraDB のストレージエンジンと型付きテーブル API の Native C++ ドキュメント。
 ---
 
 AkkaraDB Native は、AkkaraDB の C++ ストレージエンジン層です。
-
 AkkaraDB は、低レイテンシなローカル保存、WAL による耐久性、LSM ベースの永続化、型付き C++ アクセスを必要とするアプリケーション向けの組み込みデータベースです。
-
-Native 層には、ストレージエンジン、型付きテーブル API、サーバー / JNI から使うバイト列インターフェースが含まれます。
+Native 層には、ストレージエンジン、型付きテーブル API、サーバー / JNI から使うバイナリインターフェースが含まれます。
 
 ## API を選ぶ
 
@@ -20,15 +18,14 @@ AkkaraDB Native には、バイト列をそのまま扱う `AkkEngine` と、C++
 
 ## ドキュメント構成
 
-| 分野 | 状態 | 内容 |
+| 分類 | 状態 | 内容 |
 |---|---:|---|
 | 低レベル API | 作成済み | `AkkEngine` の直接利用、オプション、スキャン、履歴、バッチ、ライフサイクル |
-| 高レベル API | 予定 | `AkkaraDB`、`PackedTable`、インデックス、クエリヘルパー、結合、スキーマ |
+| 高レベル API | 作成済み | `AkkaraDB`、`PackedTable`、インデックス、クエリヘルパー、結合、スキーマ |
 | アーキテクチャ | 予定 | WAL、MemTable、SST、Blob、Manifest、VersionLog、API サーバー |
 | ベンチマーク | 予定 | Native ベンチマーク結果と環境情報 |
 
 ## 英語版
 
 英語版はこちらです。
-
 [英語の概要を読む](/akkaradb-native/)

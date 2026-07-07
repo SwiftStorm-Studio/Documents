@@ -1,9 +1,9 @@
 ---
 title: AkkaraDB
-description: Native high-level の AkkaraDB instance を開き、所有する方法。
+description: Native high-level の AkkaraDB インスタンスを開き、所有する方法。
 ---
 
-`akkaradb::AkkaraDB` は高レベル API の owner object です。`engine::AkkEngine` を開き、高レベルの startup profile を engine options に変換し、typed table と schema registration を提供します。
+`akkaradb::AkkaraDB` は高レベル API の owner オブジェクトです。`engine::AkkEngine` を開き、高レベルの起動モードをエンジンオプションに変換し、型付きテーブルとスキーマ登録を提供します。
 
 ## open
 
@@ -13,7 +13,7 @@ description: Native high-level の AkkaraDB instance を開き、所有する方
 auto db = akkaradb::AkkaraDB::open("data/app", akkaradb::StartupMode::NORMAL);
 ```
 
-単純な embedded database では `open(path, mode)` を使います。storage components や API server settings を明示的に制御したい場合は `open(AkkaraDB::Options)` を使います。
+単純な組み込みデータベースでは `open(path, mode)` を使います。保存コンポーネントや API サーバー設定を明示的に制御したい場合は `open(AkkaraDB::Options)` を使います。
 
 ```cpp
 akkaradb::AkkaraDB::Options options;
@@ -27,42 +27,42 @@ auto db = akkaradb::AkkaraDB::open(std::move(options));
 
 ## StartupMode
 
-| Mode | engine behavior |
+| Mode | エンジンの挙動 |
 |---|---|
-| `ULTRA_FAST` | WAL、SST、Blob、Manifest、VersionLog を無効化し、close 時の forced flush/sync も無効にし、大きい memtable threshold を使います。 |
-| `FAST` | WAL は async sync、VersionLog は無効、SST read promotion は有効、memtable threshold は大きめです。 |
-| `NORMAL` | 通常 component set と async WAL sync を使います。 |
+| `ULTRA_FAST` | WAL、SST、Blob、Manifest、VersionLog を無効化し、close 時の強制 flush / sync も無効にし、大きい MemTable しきい値を使います。 |
+| `FAST` | WAL は非同期 sync、VersionLog は無効、SST read promotion は有効、MemTable しきい値は大きめです。 |
+| `NORMAL` | 通常のコンポーネント構成と非同期 WAL 同期を使います。 |
 | `DURABLE` | sync WAL を使い、VersionLog を有効にします。 |
 
-StartupMode は preset として扱います。本番で依存する挙動は、`Options::overrides` で明示しておく方が読みやすくなります。
+StartupMode はプリセットとして扱います。本番で依存する挙動は、`Options::overrides` で明示しておく方が読みやすくなります。
 
-## tables
+## テーブル
 
-table は member pointer で開きます。
+テーブルはメンバポインタで開きます。
 
 ```cpp
 auto users = db->table<&User::id>("users");
 ```
 
-table name は物理的な key namespace の一部です。table rename は見た目の変更ではなく storage migration です。
+テーブル名は物理的なキー名前空間の一部です。テーブル名の変更は見た目の変更ではなく、保存データの移行です。
 
-## engine access
+## エンジンへのアクセス
 
-high-level wrapper は下層 engine を隠しません。
+高レベルラッパーは下層エンジンを隠しません。
 
 ```cpp
 auto& engine = db->engine();
 auto stats = engine.stats();
 ```
 
-`PackedTable` に typed wrapper がない低レベル機能は `db->engine()` から使います。raw engine key に対する `getAt()`、`history()`、`rollbackKey()`、`rollbackTo()` などが該当します。
+`PackedTable` に型付きラッパーがない低レベル機能は `db->engine()` から使います。生のエンジンキーに対する `getAt()`、`history()`、`rollbackKey()`、`rollbackTo()` などが該当します。
 
-## lifecycle
+## ライフサイクル
 
-`AkkaraDB` は engine を所有し、destructor で close しますが、service や test では明示的な close が便利です。
+`AkkaraDB` はエンジンを所有し、デストラクタで close しますが、サービスやテストでは明示的な close が便利です。
 
 ```cpp
 db->close();
 ```
 
-object は non-copyable / non-movable です。database directory ごとに 1 つの owner を持ち、storage access が必要な service には table や reference を渡す形にします。
+オブジェクトはコピー不可 / ムーブ不可です。データベースディレクトリごとに 1 つの owner を持ち、ストレージへのアクセスが必要なサービスにはテーブルや参照を渡す形にします。

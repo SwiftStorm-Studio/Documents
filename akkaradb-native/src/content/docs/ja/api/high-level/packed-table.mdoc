@@ -1,11 +1,11 @@
 ---
 title: PackedTable
-description: typed CRUD、scan、index、row-id、update hook、immutable field の操作。
+description: 型付き CRUD、スキャン、インデックス、行 ID、更新フック、変更不可フィールドの操作。
 ---
 
-`PackedTable<&T::id>` は高レベル API の中心です。C++ aggregate を主キーごとに 1 つの encoded value として保存し、row-id mapping や secondary index などの table metadata を管理します。
+`PackedTable<&T::id>` は高レベル API の中心です。C++ aggregate を主キーごとに 1 つのエンコード済み値として保存し、行 ID mapping やセカンダリインデックスなどのテーブルメタデータを管理します。
 
-## table を定義する
+## テーブルを定義する
 
 ```cpp
 struct User {
@@ -19,34 +19,34 @@ AKKARADB_ENTITY(User, id, name, age);
 auto users = db->table<&User::id>("users");
 ```
 
-`AKKARADB_ENTITY` は `RefTraits<User>` と query fields の両方を登録します。query だけ必要で `Ref<T>` support が不要なら `AKKARADB_QUERYABLE` を使います。
+`AKKARADB_ENTITY` は `RefTraits<User>` とクエリ用フィールドの両方を登録します。クエリだけ必要で `Ref<T>` の対応が不要なら `AKKARADB_QUERYABLE` を使います。
 
-## core methods
+## 主要メソッド
 
-| Method | Behavior |
+| Method | 挙動 |
 |---|---|
-| `put(entity)` | entity primary key で insert または replace。 |
+| `put(entity)` | エンティティの主キーで挿入または置換します。 |
 | `get(pk)` | `std::optional<Entity>` を返します。 |
-| `getInto(pk, out)` | caller-owned storage に decode します。 |
-| `exists(pk)` | current row の存在確認。 |
-| `remove(pk)` | row、row-id metadata、index entries を削除。 |
-| `upsert(pk, fn)` | load または default-construct し、primary key を設定して callback 後に write。 |
-| `updatePrimaryKey(oldPk, entity)` | row id を保ったまま new primary key へ移動。 |
-| `count()` | table namespace 内の row 数を数えます。 |
+| `getInto(pk, out)` | 呼び出し側が渡したオブジェクトに decode します。 |
+| `exists(pk)` | 現在の行の存在を確認します。 |
+| `remove(pk)` | 行、行 ID メタデータ、インデックスエントリを削除します。 |
+| `upsert(pk, fn)` | 読み込みまたはデフォルト構築し、主キーを設定してコールバック後に書き込みます。 |
+| `updatePrimaryKey(oldPk, entity)` | 行 ID を保ったまま新しい主キーへ移動します。 |
+| `count()` | テーブル名前空間内の行数を数えます。 |
 
-## primary-key update
+## 主キーの更新
 
-`put()` は同じ primary key の value を置き換える API です。identity 自体を移動する場合は `updatePrimaryKey()` を使います。
+`put()` は同じ主キーの値を置き換える API です。識別子自体を移動する場合は `updatePrimaryKey()` を使います。
 
 ```cpp
 users.updatePrimaryKey(1, User{10, "Alice Cooper", 31});
 ```
 
-移動先 primary key は存在してはいけません。stable row id は維持されるため、`Ref<T>` は引き続き解決できます。
+移動先の主キーは存在してはいけません。安定した行 ID は維持されるため、`Ref<T>` は引き続き解決できます。
 
-## scans
+## スキャン
 
-`scanAll()` は table namespace 全体を scan します。`scan(startPk, endPk)` は half-open primary-key range を scan します。
+`scanAll()` はテーブル名前空間全体をスキャンします。`scan(startPk, endPk)` は半開区間の主キー範囲をスキャンします。
 
 ```cpp
 auto rows = users.scan(100ULL, 200ULL);
@@ -55,24 +55,24 @@ while (rows.hasNext()) {
 }
 ```
 
-返る `Entry` には `id` と `value` が入ります。数値 primary key は sortable byte order で encode されるため、range scan は自然な数値順になります。
+返る `Entry` には `id` と `value` が入ります。数値の主キーはソート可能なバイト順でエンコードされるため、範囲スキャンは自然な数値順になります。
 
-## indexes
+## インデックス
 
-index は、その index で見つけたい row を書く前に登録します。
+インデックスは、そのインデックスで見つけたい行を書き込む前に登録します。
 
 ```cpp
 auto byEmail = users.index<&User::email>();
 auto alice = byEmail.find("alice@example.test");
 ```
 
-`indexed<&Field>()` は chainable な registration helper です。`findBy<&Field>(value)` は最初に見つかった entity を返し、field index が未登録なら throw します。
+`indexed<&Field>()` は連結して呼べる登録ヘルパーです。`findBy<&Field>(value)` は最初に見つかったエンティティを返し、フィールドインデックスが未登録なら例外を投げます。
 
-index entries は insert、replacement、remove、primary-key update で更新されます。既存 row は自動 backfill されません。
+インデックス項目は挿入、置換、削除、主キー更新で更新されます。既存行は自動的には反映されません。
 
-## update hooks
+## 更新フック
 
-`onUpdate<&Field>()` は、既存 row の置き換えで対象 field が変わったときに実行されます。
+`onUpdate<&Field>()` は、既存行の置き換えで対象フィールドが変わったときに実行されます。
 
 ```cpp
 users.onUpdate<&User::age>(
@@ -82,11 +82,11 @@ users.onUpdate<&User::age>(
 );
 ```
 
-hook は replacement entity が encode される前に走ります。table write path の中で実行されるため、deterministic で local な処理に留めるのが扱いやすいです。
+フックは置き換え後のエンティティがエンコードされる前に走ります。テーブルの書き込み経路の中で実行されるため、決定的で局所的な処理に留めるのが扱いやすいです。
 
-## immutable fields
+## 変更不可フィールド
 
-`Immutable<T>` は、読み込み後または保存後に変更したくない field を守ります。
+`Immutable<T>` は、読み込み後または保存後に変更したくないフィールドを守ります。
 
 ```cpp
 struct Account {
@@ -95,4 +95,4 @@ struct Account {
 };
 ```
 
-sealed immutable field を replacement 時に変更すると throw します。primary-key field には `Immutable<T>` を使えません。
+seal 済みの immutable field を置き換え時に変更すると、例外を投げます。主キーフィールドには `Immutable<T>` を使えません。

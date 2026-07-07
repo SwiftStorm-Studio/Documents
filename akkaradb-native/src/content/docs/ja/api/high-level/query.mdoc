@@ -1,13 +1,13 @@
 ---
 title: Query
-description: C++ typed query expressions、QueryView methods、index planning behavior。
+description: C++ の型付きクエリ式、QueryView のメソッド、インデックス計画の挙動。
 ---
 
-高レベル query API は、overloaded C++ operators で expression type を組み立てます。runtime lambda interpreter ではなく、compiler plugin も不要です。
+高レベルのクエリ API は、オーバーロードされた C++ 演算子で式の型を組み立てます。実行時にラムダ式を解釈する仕組みではなく、コンパイラプラグインも不要です。
 
-## setup
+## 準備
 
-query で使う field は `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で登録します。
+クエリで使うフィールドは `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で登録します。
 
 ```cpp
 struct Profile {
@@ -20,7 +20,7 @@ struct Profile {
 AKKARADB_ENTITY(Profile, id, email, name, age);
 ```
 
-## basic query
+## 基本的なクエリ
 
 ```cpp
 auto adults = profiles
@@ -31,50 +31,50 @@ auto adults = profiles
     .toVector();
 ```
 
-`query()` は `QueryView` を返します。iteration または terminal method を呼ぶまで lazy です。
+`query()` は `QueryView` を返します。反復処理または終端メソッドを呼ぶまで遅延評価されます。
 
-| Method | Result |
+| Method | 結果 |
 |---|---|
-| `where(fn)` | logical `AND` で predicate を追加。 |
-| `limit(n)` | matched rows を制限。 |
+| `where(fn)` | 論理 `AND` で条件を追加します。 |
+| `limit(n)` | 一致した行数を制限します。 |
 | `first()` | `std::optional<Entry>` を返します。 |
 | `any()` | `bool` を返します。 |
-| `count()` | matched rows を数えます。 |
-| `toVector()` | matched entries を materialize します。 |
+| `count()` | 一致した行を数えます。 |
+| `toVector()` | 一致したエントリを実体化します。 |
 
-## supported expressions
+## 対応している式
 
-| Expression | Example |
+| 式 | 例 |
 |---|---|
-| equality / comparison | `profile.age >= 18` |
-| logical operators | `profile.age >= 18 && profile.name != "Bob"` |
-| list membership | `profile.name.in({"Alice", "Carol"})` |
-| negative membership | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
-| string prefix/search | `profile.email.startsWith("a@")`, `profile.email.contains("@")` |
-| SQL-like string pattern | `profile.email.like("a@%")` |
-| optional checks | `profile.nickname.isNull()` |
-| nested fields | `user.address.template field<&Address::city>() == "Tokyo"` |
+| 等価 / 比較 | `profile.age >= 18` |
+| 論理演算子 | `profile.age >= 18 && profile.name != "Bob"` |
+| リストに含まれるか | `profile.name.in({"Alice", "Carol"})` |
+| リストに含まれないか | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
+| 文字列の prefix / search | `profile.email.startsWith("a@")`, `profile.email.contains("@")` |
+| SQL 風の文字列パターン | `profile.email.like("a@%")` |
+| optional の確認 | `profile.nickname.isNull()` |
+| ネストしたフィールド | `user.address.template field<&Address::city>() == "Tokyo"` |
 | map lookup | `user.tags.get("tier") == std::optional<std::string>{"gold"}` |
 
-nested field は dependent template call になるため、`template field<...>()` と書きます。
+ネストしたフィールドは依存名のテンプレート呼び出しになるため、`template field<...>()` と書きます。
 
-## index planning
+## インデックス計画
 
-planner は registered index を探して candidate set を狭めます。返す前には必ず完全な expression で filter されます。
+planner は登録済みインデックスを探して候補集合を狭めます。返す前には必ず完全な式で絞り込みます。
 
-| Predicate | Plan |
+| 条件 | 計画 |
 |---|---|
-| `field == literal` | equality index range。 |
-| numeric range | `bool` 以外の arithmetic field では ordered index range。 |
-| `field.in(values)` | value ごとの equality range。candidate primary key は dedupe。 |
-| `field != literal`、`notIn`、`isNotNull` | full field-index scan + expression filtering。 |
-| `isNull` | encoded empty optional の equality range。 |
-| string `contains`、`startsWith`、一部の `like` | 現在の実装では full field-index scan + expression filtering。 |
-| `AND` | usable indexed side を選ぶことがあります。 |
-| `OR` | 正しく評価されますが、それ単体では multi-index union plan になりません。 |
+| `field == literal` | 等価条件のインデックス範囲。 |
+| 数値範囲 | `bool` 以外の算術フィールドでは順序付きインデックス範囲。 |
+| `field.in(values)` | 値ごとの等価範囲。候補の主キーは重複排除されます。 |
+| `field != literal`、`notIn`、`isNotNull` | フィールドインデックス全体のスキャン + 式による絞り込み。 |
+| `isNull` | エンコードされた空 optional の等価範囲。 |
+| string `contains`、`startsWith`、一部の `like` | 現在の実装ではフィールドインデックス全体のスキャン + 式による絞り込み。 |
+| `AND` | 使用できるインデックス側を選ぶことがあります。 |
+| `OR` | 正しく評価されますが、それ単体では複数インデックスの union 計画になりません。 |
 
-usable index がなければ table range scan に fallback します。
+使えるインデックスがなければテーブル範囲スキャンに fallback します。
 
-## practical rules
+## 実用上の目安
 
-table を開いた直後に index を登録します。predicate は読みやすさのために query で書き、full table scan を避けたい predicate に index を足します。map や nested-field predicate は表現力のために使えますが、top-level indexed predicate がない限り index-seeded とは考えない方が安全です。
+テーブルを開いた直後にインデックスを登録します。条件は読みやすさのために `query()` で書き、全件スキャンを避けたい条件にインデックスを足します。map やネストしたフィールドの条件は表現力のために使えますが、トップレベルの indexed predicate がない限り、インデックス起点とは考えない方が安全です。

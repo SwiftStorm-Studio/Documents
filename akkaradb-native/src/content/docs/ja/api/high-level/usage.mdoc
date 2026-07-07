@@ -1,9 +1,9 @@
 ---
 title: 高レベル API の使い方
-description: Native C++ から AkkaraDB、PackedTable、index、query、ref、join、schema hook を使う方法。
+description: Native C++ から AkkaraDB、PackedTable、インデックス、クエリ、参照、結合、スキーマフックを使う方法。
 ---
 
-このページは、raw byte buffer を直接扱わずに、C++ struct を AkkaraDB Native に保存したい場合の入口です。
+このページは、生のバイト列バッファを直接扱わずに、C++ 構造体を AkkaraDB Native に保存したい場合の入口です。
 
 ## include と open
 
@@ -32,26 +32,26 @@ int main() {
 }
 ```
 
-一番単純な入口は `AkkaraDB::open(path, mode)` です。engine のしきい値、VersionLog、codec、blob、API server、startup profile などを細かく指定したい場合は `AkkaraDB::open(AkkaraDB::Options)` を使います。
+一番単純な入口は `AkkaraDB::open(path, mode)` です。エンジンのしきい値、VersionLog、コーデック、Blob、API サーバー、起動プロファイルなどを細かく指定したい場合は `AkkaraDB::open(AkkaraDB::Options)` を使います。
 
 ## StartupMode
 
-`StartupMode` は下層の engine 設定に渡される profile です。
+`StartupMode` は下層のエンジン設定へ渡される起動モードです。
 
 | Mode | 主な用途 |
 |---|---|
-| `ULTRA_FAST` | smoke test、benchmark、短時間のローカル実験。WAL、SST、blob、manifest、VersionLog を無効化し、close 時の強制 flush/sync も無効にして、大きめの memtable threshold を使います。 |
-| `FAST` | 起動速度を優先したい場合。WAL は async sync、VersionLog は無効、SST read promotion は有効、大きめの memtable threshold を使います。 |
-| `NORMAL` | 一般的な embedded 利用。WAL は async sync で、component は通常の default set を使います。 |
-| `DURABLE` | startup/write speed より durability を優先したい場合。WAL は sync、VersionLog は有効です。 |
+| `ULTRA_FAST` | smoke test、benchmark、短時間のローカル実験。WAL、SST、Blob、Manifest、VersionLog を無効化し、close 時の強制 flush / sync も無効にして、大きめの MemTable しきい値を使います。 |
+| `FAST` | 起動速度を優先したい場合。WAL は非同期 sync、VersionLog は無効、SST read promotion は有効、大きめの MemTable しきい値を使います。 |
+| `NORMAL` | 一般的な組み込み利用。WAL は非同期 sync で、コンポーネントは通常の default set を使います。 |
+| `DURABLE` | 起動速度や書き込み速度より耐久性を優先したい場合。WAL は sync、VersionLog は有効です。 |
 
-正確な低レベル option への展開は engine 層の責務です。明示的に制御したい場合は `AkkaraDB::Options::overrides` を使います。
+正確な低レベルオプションへの展開はエンジン層の責務です。明示的に制御したい場合は `AkkaraDB::Options::overrides` を使います。
 
-`AkkaraDB::Options::overrides` では、per-shard memtable threshold、VersionLog、SST codec、blob codec、blob threshold、SST read promotion、Bloom filter bits per key、max L0 SST files を上書きできます。`Options::api` は API server の backend、port、transport、TLS/PSK、HTTP、TCP、gRPC の limit を下層 engine options に渡します。
+`AkkaraDB::Options::overrides` では、シャードごとの MemTable しきい値、VersionLog、SST codec、Blob codec、Blob しきい値、SST read promotion、Bloom filter のキーあたりビット数、L0 SST ファイル数の上限を上書きできます。`Options::api` は API サーバーの backend、port、transport、TLS / PSK、HTTP、TCP、gRPC の制限値を下層のエンジンオプションに渡します。
 
-## Entity を定義する
+## エンティティを定義する
 
-`PackedTable` は、主キー field への member pointer で型付けされます。
+`PackedTable` は、主キーフィールドへのメンバポインタで型付けされます。
 
 ```cpp
 struct Profile {
@@ -70,33 +70,33 @@ auto profiles = db->table<&Profile::id>("profiles");
 
 | 生成される情報 | 用途 |
 |---|---|
-| `RefTraits<Type>` | `Ref<Type>`、schema 登録、row-id reference が主キーを知るために使います。 |
-| query proxy fields | `table.query([](auto row) { ... })` の中で field を参照するために使います。 |
+| `RefTraits<Type>` | `Ref<Type>`、スキーマ登録、行 ID 参照が主キーを知るために使います。 |
+| クエリ用フィールド | `table.query([](auto row) { ... })` の中でフィールドを参照するために使います。 |
 
-`Ref<T>` traits が不要で、query 用の field だけを登録したい場合は `AKKARADB_QUERYABLE(Type, ...)` を使います。
+`Ref<T>` 用の trait が不要で、クエリ用フィールドだけを登録したい場合は `AKKARADB_QUERYABLE(Type, ...)` を使います。
 
-### BinPack の対応形
+## BinPack の対応形式
 
-entity は BinPack で encode されます。aggregate struct は Boost.PFR で宣言順に field を encode するため、storage compatibility は field order と型 layout に依存します。
+エンティティは `BinPack` でエンコードされます。集約型構造体は Boost.PFR で宣言順にフィールドをエンコードするため、ストレージ互換性はフィールド順と型の配置に依存します。
 
-| Shape | Notes |
+| 形 | 補足 |
 |---|---|
-| `bool`、signed/unsigned integer、`float`、`double` | built-in adapter があります。 |
-| `enum` | underlying integer type で encode されます。 |
-| `std::string`、`std::string_view` | `string_view` adapter は write-only です。保存値を読む用途では owning string を使います。 |
-| `std::vector<T>`、`std::vector<uint8_t>`、`std::array<T, N>` | element にも adapter が必要です。 |
-| `std::map<K, V>`、`std::unordered_map<K, V>` | key/value にも adapter が必要です。 |
-| `std::optional<T>` | presence byte と、値がある場合の value を encode します。 |
-| `std::pair<A, B>`、`std::tuple<Ts...>` | 要素順に encode します。 |
-| aggregate struct | trivially copyable aggregate は memcpy fast path、それ以外は field-by-field です。 |
-| `akkaradb::Ref<T>` | referenced row id を encode します。 |
-| `akkaradb::Immutable<T>` | wrapped value を encode し、decode 時は sealed value として戻ります。 |
+| `bool`、整数、`float`、`double` | 組み込みアダプタがあります。 |
+| `enum` | underlying integer type でエンコードされます。 |
+| `std::string`、`std::string_view` | `string_view` アダプタは書き込み専用です。保存値を読む用途では所有権を持つ文字列を使います。 |
+| `std::vector<T>`、`std::vector<uint8_t>`、`std::array<T, N>` | 要素にもアダプタが必要です。 |
+| `std::map<K, V>`、`std::unordered_map<K, V>` | キーと値にもアダプタが必要です。 |
+| `std::optional<T>` | 存在フラグと、値がある場合の値をエンコードします。 |
+| `std::pair<A, B>`、`std::tuple<Ts...>` | 要素ごとにエンコードします。 |
+| 集約型構造体 | trivially copyable な集約型は `memcpy` の高速経路、それ以外はフィールドごとに処理します。 |
+| `akkaradb::Ref<T>` | 参照先の行 ID をエンコードします。 |
+| `akkaradb::Immutable<T>` | 包んでいる値をエンコードし、デコード時は seal 済みの値として戻ります。 |
 
-data が存在した後の field order、field type、table name の変更は storage migration として扱います。
+データが存在した後のフィールド順、フィールド型、テーブル名の変更は、ストレージ移行として扱います。
 
 ## 基本操作
 
-`PackedTable` は主キーごとに 1 つの encoded entity を保存します。
+`PackedTable` は主キーごとに 1 つのエンコード済みエンティティを保存します。
 
 ```cpp
 profiles.put(Profile{1, "alice@example.test", "Alice", 30});
@@ -110,22 +110,20 @@ bool decoded = profiles.getInto(1, out);
 profiles.remove(1);
 ```
 
-### 主要メソッド
-
-| Method | Return | Notes |
+| メソッド | 戻り値 | 内容 |
 |---|---|---|
-| `put(entity)` | `void` | entity の主キーで insert または replace します。 |
-| `get(pk)` | `std::optional<Entity>` | 見つかった場合に decode した entity を返します。 |
-| `getInto(pk, out)` | `bool` | 既存 object に decode し、row が存在したかを返します。 |
-| `exists(pk)` | `bool` | table row key の存在を確認します。 |
-| `remove(pk)` | `void` | row、table index、row-id metadata を削除します。 |
-| `upsert(pk, fn)` | `void` | entity を読み込むか default construct し、主キーを代入してから `fn` を実行して保存します。 |
-| `updatePrimaryKey(oldPk, entity)` | `void` | stable row id を保ったまま、row を `entity` の主キーへ移動します。 |
-| `rowIdOf(pk)` | `std::optional<RowId>` | 主キーから内部 row id を引きます。 |
-| `primaryKeyOf(rowId)` | `std::optional<PK>` | row id から現在の主キーを引きます。 |
-| `getByRowId(rowId)` | `std::optional<Entity>` | row-id metadata 経由で現在の entity を読みます。 |
-| `getIntoByRowId(rowId, out)` | `bool` | row id 版の `getInto` です。 |
-| `count()` | `size_t` | table key range 内の row 数を数えます。 |
+| `put(entity)` | `void` | エンティティの主キーで挿入または置換します。 |
+| `get(pk)` | `std::optional<Entity>` | 見つかった場合にデコードしたエンティティを返します。 |
+| `getInto(pk, out)` | `bool` | 既存オブジェクトにデコードし、行が存在したかを返します。 |
+| `exists(pk)` | `bool` | テーブル行キーの存在を確認します。 |
+| `remove(pk)` | `void` | 行、テーブルインデックス、行 ID メタデータを削除します。 |
+| `upsert(pk, fn)` | `void` | エンティティを読み込むかデフォルト構築し、主キーを代入してから `fn` を実行して保存します。 |
+| `updatePrimaryKey(oldPk, entity)` | `void` | 安定した行 ID を保ったまま、行を `entity` の主キーへ移動します。 |
+| `rowIdOf(pk)` | `std::optional<RowId>` | 主キーから内部の行 ID を引きます。 |
+| `primaryKeyOf(rowId)` | `std::optional<PK>` | 行 ID から現在の主キーを引きます。 |
+| `getByRowId(rowId)` | `std::optional<Entity>` | 行 ID メタデータ経由で現在のエンティティを読みます。 |
+| `getIntoByRowId(rowId, out)` | `bool` | 行 ID 版の `getInto` です。 |
+| `count()` | `size_t` | テーブルのキー範囲内にある行数を数えます。 |
 
 ## upsert
 
@@ -139,11 +137,11 @@ profiles.upsert(1, [](Profile& profile) {
 });
 ```
 
-table は callback の前に `entity.*PrimaryKeyPtr = pk` を代入します。callback ではその主キーを維持するのが基本です。主キー自体を変える場合は `updatePrimaryKey()` を使います。
+テーブルはコールバックの前に `entity.*PrimaryKeyPtr = pk` を代入します。コールバックではその主キーを維持するのが基本です。主キー自体を変える場合は `updatePrimaryKey()` を使います。
 
 ## 主キーを変更する
 
-`updatePrimaryKey()` は既存 row を新しい主キーに移動し、内部 row id は維持します。
+`updatePrimaryKey()` は既存行を新しい主キーに移動し、内部の行 ID は維持します。
 
 ```cpp
 profiles.updatePrimaryKey(
@@ -152,48 +150,38 @@ profiles.updatePrimaryKey(
 );
 ```
 
-`Ref<T>` は見えている主キー bytes ではなく row-id metadata で解決されるため、これは重要です。移動先の主キーが既に存在する場合は失敗します。
+`Ref<T>` は見えている主キーのバイト列ではなく、行 ID メタデータで解決されるため、これは重要です。移動先の主キーが既に存在する場合は失敗します。
 
-## scan
+## スキャン
 
-`scanAll()` と `scan()` は、`hasNext()` / `next()` を持つ cursor 風の range を返します。
+`scanAll()` と `scan()` は、`hasNext()` / `next()` を持つカーソル風の範囲を返します。
 
 ```cpp
 auto rows = profiles.scanAll();
 while (rows.hasNext()) {
     auto entry = rows.next();
-    // entry.id が主キー、entry.value が decode 済み Profile。
+    // entry.id が主キー、entry.value がデコード済み Profile。
 }
 ```
 
-range scan は主キー順で進みます。
+範囲スキャンは主キー順で進みます。
 
 ```cpp
 auto page = profiles.scan(100ULL, 200ULL);
-while (page.hasNext()) {
-    auto entry = page.next();
-}
 ```
 
-`scan(startPk)` は `startPk` から table namespace の終端まで scan します。数値の主キーは sortable に encode されるため、signed / unsigned の数値 key は自然な数値順で scan できます。
+`scan(startPk)` は `startPk` からテーブル名前空間の終端までスキャンします。数値の主キーはソート可能にエンコードされるため、signed / unsigned の数値キーは自然な数値順でスキャンできます。
 
-## セカンダリインデックス
+## インデックス
 
-index は member pointer で登録します。
+インデックスはメンバポインタで登録します。
 
 ```cpp
 auto byAge = profiles.index<&Profile::age>();
-
-profiles.put(Profile{1, "a@example.test", "Alice", 30});
-profiles.put(Profile{2, "b@example.test", "Bob", 30});
-
-auto age30 = byAge.find(30);
-while (age30.hasNext()) {
-    auto entry = age30.next();
-}
+auto adults = byAge.range(18, 120);
 ```
 
-戻り値を保持しない場合は、`indexed()` で chain できます。
+戻り値を保持しない場合は、`indexed()` で連結できます。
 
 ```cpp
 profiles.indexed<&Profile::email>()
@@ -201,126 +189,99 @@ profiles.indexed<&Profile::email>()
         .indexed<&Profile::name>();
 ```
 
-`findBy<&Field>(value)` は最初に見つかった entity を返します。この field の index が登録されている必要があります。
+`findBy<&Field>(value)` は最初に見つかったエンティティを返します。このフィールドのインデックスが登録されている必要があります。
+
+インデックスは `put()`、`remove()`、`updatePrimaryKey()` のときに更新されます。既存行に対する自動反映はないため、インデックスはそのインデックスで探したい行を書く前に登録します。
+
+## クエリ
+
+C++ のクエリ API は、演算子オーバーロードとプロキシオブジェクトで型付きの式をコンパイル時に組み立てます。この層では、実行時ラムダ解釈や追加のソース書き換えは使いません。
 
 ```cpp
-auto bob = profiles.findBy<&Profile::email>("b@example.test");
-```
-
-index は `put()`、`remove()`、`updatePrimaryKey()` のときに更新されます。既存 row に対する自動 backfill はないため、index はその index で探したい row を書く前に登録します。
-
-## query
-
-C++ の query API は、operator overload と proxy object で型付きの式を compile-time に組み立てます。この層では runtime lambda interpreter や追加の source rewrite step は使いません。
-
-```cpp
-auto adults = profiles
+auto result = profiles
     .query([](auto profile) {
-        return profile.age >= 18;
+        return profile.email == "alice@example.test" && profile.age >= 18;
     })
-    .limit(10)
     .toVector();
-
-auto alice = profiles
-    .query([](auto profile) {
-        return profile.email == "alice@example.test";
-    })
-    .first();
 ```
 
-query proxy は `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で生成されます。対応している operator は、等価、不等価、比較、logical `&&` / `||`、`in`、`notIn`、`startsWith`、`contains`、`like`、null check、nested field、map lookup です。
+クエリプロキシは `AKKARADB_ENTITY` または `AKKARADB_QUERYABLE` で生成されます。対応している演算子は、等価、不等価、比較、論理 `&&` / `||`、`in`、`notIn`、`startsWith`、`contains`、`like`、null 確認、ネストしたフィールド、マップからの値取得です。
 
-### QueryView のメソッド
-
-| Method | Notes |
+| メソッド | 内容 |
 |---|---|
-| `where(fn)` | predicate を logical `AND` で追加します。 |
-| `limit(n)` | match した row が `n` 件になったら止めます。 |
+| `where(fn)` | 述語を論理 `AND` で追加します。 |
 | `first()` | `std::optional<Entry>` を返します。 |
-| `any()` | 1 件以上 match するかを返します。 |
-| `count()` | match した row 数を数えます。 |
-| `toVector()` | match した entry を materialize します。 |
+| `any()` | 1 件でも一致するかを返します。 |
+| `count()` | 一致件数を数えます。 |
+| `toVector()` | 一致した項目を `std::vector` に展開します。 |
 
-### index を使う計画
+### インデックスを使う計画
 
-planner は、登録済み index を使える predicate を探します。返す前には常に完全な式で filter されるため、index は candidate set を狭める役割です。
+計画器は、登録済みインデックスを使える述語を探します。返す前には常に完全な式で絞り込むため、インデックスは候補集合を狭める役割です。
 
-```cpp
-auto result = profiles.query([](auto profile) {
-    return profile.email == "b@example.test" && profile.age >= 18;
-}).first();
-```
-
-この例では `email` index があれば scan の起点になり、`age >= 18` は残りの filter として評価されます。
-
-| Predicate shape | Indexed plan behavior |
+| 述語の形 | インデックス計画 |
 |---|---|
-| `field == literal` | field index の equality range。 |
-| `field != literal` | field index 全体を scan し、expression で filter。 |
-| numeric `field >/>=/</<= literal` | `bool` 以外の arithmetic field では ordered index range。 |
-| `field.in(values)` | value ごとの equality range。candidate primary key は dedupe されます。 |
-| `field.notIn(values)` | field index 全体を scan し、expression で filter。 |
-| optional `field.isNull()` | empty optional の encoded value に対する equality range。 |
-| optional `field.isNotNull()` | field index 全体を scan し、expression で filter。 |
-| string `startsWith`、`contains` | 現在の実装では field index 全体を scan し、expression で filter。 |
-| string `like("exact")` | equality range。 |
-| string `like("prefix%")` | 現在の実装では field index 全体を scan し、expression で filter。 |
-| `&&` の中の predicate | planner が使える indexed side を選ぶことがあります。 |
-| `||`、nested field、map lookup | 正しく評価されますが、別の usable indexed predicate がない限り table scan fallback です。 |
+| `field == literal` | フィールドインデックスの等価範囲。 |
+| `field != literal` | フィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| 数値の `field >/>=/</<= literal` | `bool` 以外の算術フィールドでは順序付きインデックス範囲。 |
+| `field.in(values)` | 値ごとの等価範囲。候補の主キーは重複排除されます。 |
+| `field.notIn(values)` | フィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| `field.isNull()` | 空の `optional` に対応するエンコード済み値の等価範囲。 |
+| `field.isNotNull()` | フィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| `startsWith`、`contains` | 現在の実装ではフィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| `like("exact")` | 等価範囲。 |
+| `like("prefix%")` | 現在の実装ではフィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| `&&` の中の述語 | 計画器が使えるインデックス側を選ぶことがあります。 |
+| `||`、ネストしたフィールド、map からの値取得 | 正しく評価されますが、別の利用可能なインデックス付き述語がない限りテーブルスキャンへフォールバックします。 |
 
 ## optional / nested / map field
 
-query proxy は optional field、nested struct field、map lookup を扱えます。
+クエリプロキシは optional field、nested struct field、map lookup を扱えます。
 
 ```cpp
 auto unnamed = users.query([](auto user) {
     return user.nickname.isNull();
-}).toVector();
+});
 
 auto tokyo = users.query([](auto user) {
     return user.address.template field<&Address::city>() == "Tokyo";
-}).toVector();
+});
 
 auto gold = users.query([](auto user) {
     return user.tags.get("tier") == std::optional<std::string>{"gold"};
-}).toVector();
+});
 ```
 
-nested field は dependent template call になるため、`template field<&Nested::field>()` と書きます。
+ネストしたフィールドは依存名のテンプレート呼び出しになるため、`template field<&Nested::field>()` と書きます。
 
-## Immutable field
+## 変更不可フィールド
 
-作成時には設定できるが、保存後は変更したくない field には `akkaradb::Immutable<T>` を使います。
+作成時には設定できるが、保存後は変更したくないフィールドには `akkaradb::Immutable<T>` を使います。
 
 ```cpp
 struct Account {
     uint64_t id;
     akkaradb::Immutable<std::string> handle;
-    uint32_t age;
 };
-
-AKKARADB_ENTITY(Account, id, handle, age);
 ```
 
-`put()` は読み込み後または書き込み後に immutable field を seal します。seal 済みの field を後から変更しようとすると例外になります。主キー field には `Immutable<T>` を使えません。
+`put()` は読み込み後または書き込み後に immutable field を seal します。seal 済みのフィールドを後から変更しようとすると例外になります。主キーフィールドには `Immutable<T>` を使えません。
 
-## update hook
+## 更新フック
 
-`onUpdate<&Field>()` は、既存 row の置き換えで対象 field が変わったときだけ実行されます。
+`onUpdate<&Field>()` は、既存行の置き換えで対象フィールドが変わったときだけ実行されます。
 
 ```cpp
-profiles.onUpdate<&Profile::age>(
-    [](const auto& oldAge, const auto& newAge, const Profile& oldProfile, Profile& newProfile) {
-        newProfile.email = std::format("age-{}@example.test", newAge);
-    }
-);
+profiles.onUpdate<&Profile::email>([](const Profile& oldValue, Profile& newValue) {
+    newValue.email = normalizeEmail(newValue.email);
+});
 ```
 
-handler は old entity を見ながら、encode 前の new entity を変更できます。正規化、派生 field、小さな validation に向いています。table write path の中で実行されるため、重い副作用は hook の外に置く方が扱いやすいです。
+ハンドラは古いエンティティを見ながら、エンコード前の新しいエンティティを変更できます。正規化、派生フィールド、小さな検証に向いています。テーブルの書き込み経路の中で実行されるため、重い副作用はフックの外に置く方が扱いやすいです。
 
-## reference
+## 参照
 
-`Ref<T>` は、主キー、row id、読み込み済み value のいずれかを持ち、table binding に attach されると遅延解決できます。
+`Ref<T>` は、主キー、行 ID、読み込み済み値のいずれかを持ち、テーブル接続情報が取り付けられると遅延解決できます。
 
 ```cpp
 struct Author {
@@ -328,28 +289,27 @@ struct Author {
     std::string name;
 };
 
-AKKARADB_ENTITY(Author, id, name);
-
 struct Post {
     uint64_t id;
     akkaradb::Ref<Author> author;
     std::string title;
 };
 
+AKKARADB_ENTITY(Author, id, name);
 AKKARADB_ENTITY(Post, id, author, title);
 
 authors.put({1, "Alice"});
 posts.put({100, akkaradb::ref<Author>(1), "Hello"});
 
 auto post = posts.get(100);
-auto authorName = post->author->name;
+auto name = post->author->name;
 ```
 
-`Ref<T>` を entity から作った場合、その referenced entity は dirty と見なされます。`PackedTable::put()` は owner entity を書く前に dirty ref を flush します。
+`Ref<T>` をエンティティから作った場合、その参照先エンティティは dirty と見なされます。`PackedTable::put()` は owner エンティティを書く前に、dirty な参照先を保存します。
 
-## join
+## 結合
 
-join は scan と lookup の上にある typed view です。
+結合は、スキャンと検索の上にある型付きビューです。
 
 ```cpp
 auto joined = posts
@@ -360,17 +320,17 @@ auto joined = posts
     .toVector();
 ```
 
-plain field で join する場合は、左右の member pointer を指定します。
+通常フィールドで結合する場合は、左右のメンバポインタを指定します。
 
 ```cpp
 auto joined = posts.join<&Post::authorId, &Author::id>(authors).toVector();
 ```
 
-右側 field が右 table の主キーなら primary-key lookup を使います。それ以外の場合は left row ごとに right table を scan します。
+右側フィールドが右テーブルの主キーなら主キー検索を使います。それ以外の場合は、左側の行ごとに右テーブルをスキャンします。
 
-## schema と foreign key
+## スキーマと外部キー
 
-`AkkaraDB::Schema` は typed table を登録し、hook ベースの foreign-key 動作を設定します。
+`AkkaraDB::Schema` は型付きテーブルを登録し、hook ベースの外部キー動作を設定します。
 
 ```cpp
 auto schema = db->schema()
@@ -383,7 +343,7 @@ auto& authors = schema.table<Author>();
 auto& posts = schema.table<Post>();
 ```
 
-plain field の relation では source field と target field を指定します。
+通常フィールドの関連では、参照元フィールドと参照先フィールドを指定します。
 
 ```cpp
 schema.foreignKey<&PlainPost::authorId, &Author::id>(
@@ -392,45 +352,43 @@ schema.foreignKey<&PlainPost::authorId, &Author::id>(
 );
 ```
 
-### foreign-key action
+### 外部キー動作
 
-| Action | delete 時 | primary-key update 時 |
+| 動作 | 削除時 | 主キー更新時 |
 |---|---|---|
-| `Restrict` | 参照されている target の削除を拒否します。 | 参照されている target key の移動を拒否します。 |
-| `Cascade` | target を参照する source row を削除します。 | source field を新しい target key に書き換えます。 |
-| `SetNull` | nullable source field を `std::nullopt` にします。 | nullable source field を `std::nullopt` にします。 |
+| `Restrict` | 参照されている参照先の削除を拒否します。 | 参照されている参照先キーの移動を拒否します。 |
+| `Cascade` | 参照先を参照する参照元行を削除します。 | 参照元フィールドを新しい参照先キーに書き換えます。 |
+| `SetNull` | null 許容の参照元フィールドを `std::nullopt` にします。 | null 許容の参照元フィールドを `std::nullopt` にします。 |
 
-delete 用に 1 つ、update 用に 1 つだけ action を選べます。`SetNull` には nullable source field が必要です。foreign key は native constraint subsystem ではなく、table hook と scan で実装されています。
+削除用に 1 つ、更新用に 1 つだけ動作を選べます。`SetNull` には null 許容の参照元フィールドが必要です。外部キーは専用の制約サブシステムではなく、テーブルフックとスキャンで実装されています。
 
-target field が target table の主キーではない場合、`foreignKey<FieldPtr, TargetFieldPtr>()` は target field の index を登録し、存在確認に indexed lookup を使います。delete / update action は、それでも referencing row を見つけるために source table を scan します。`Ref<T>` field では delete action は target primary key 前提で、update action は row id が安定しているため実質 skip されます。
+参照先フィールドが参照先テーブルの主キーではない場合、`foreignKey<FieldPtr, TargetFieldPtr>()` は参照先フィールドのインデックスを登録し、存在確認にインデックス検索を使います。削除 / 更新時の動作では、それでも参照元行を見つけるために参照元テーブルをスキャンします。`Ref<T>` フィールドでは削除時の動作は参照先主キー前提で、更新時の動作は行 ID が安定しているため実質的に省略されます。
 
-## VersionLog との関係
+## 低レベル API との関係
 
-Native 高レベル API の typed data は、低レベル API と同じ engine key space に保存されます。下層 engine で VersionLog が有効なら、typed row も最終的には engine key/value write なので、同じ version history の対象になります。
+Native 高レベル API の型付きデータは、低レベル API と同じエンジンのキー空間に保存されます。下層エンジンで VersionLog が有効なら、型付き行も最終的にはエンジンのキー / 値書き込みなので、同じバージョン履歴の対象になります。
 
-この C++ high-level header が現在公開しているのは、current-row CRUD、row-id lookup、scan、query、index、ref、join、schema 動作です。`PackedTable` には typed `getAt()` や typed `history()` helper は見えていないため、明示的な historical read や rollback control が必要な場合は `db->engine()` から低レベルの VersionLog API を使います。
+この C++ 高レベルヘッダが現在公開しているのは、current-row CRUD、行 ID 検索、スキャン、クエリ、インデックス、参照、結合、スキーマ動作です。`PackedTable` には型付きの `getAt()` や `history()` ヘルパーは見えていないため、明示的な historical read や rollback control が必要な場合は `db->engine()` から低レベルの VersionLog API を使います。
 
 ## よくある失敗
 
-| 症状 | よくある原因 |
+| 症状 | 確認すること |
 |---|---|
-| `findBy<&Field>()` が throw する | `index<&Field>()` または `indexed<&Field>()` で field index を登録していない。 |
-| 新しく登録した index が古い row を見つけない | index registration は既存 row を backfill しません。index 登録後に row を rewrite / rebuild します。 |
-| `Ref<T>` が resolve できない | ref が detached、target table が schema/binding に登録されていない、または target row が削除されています。 |
-| `foreignKey<&RefField>()` が target table not registered で失敗する | schema に referenced entity table が含まれていません。 |
-| `SetNull` setup が失敗する | source field が `std::optional<T>` ではありません。 |
-| `updatePrimaryKey()` が destination exists で失敗する | 新しい主キーが既に存在します。 |
-| 読み込んだ `Immutable<T>` field の代入が失敗する | decode または persist 後に value が sealed されています。 |
-| table rename 後に data が見えない | table name は hashed storage prefix の一部です。 |
-| struct change 後に decode 前提が崩れる | BinPack aggregate encoding は field order と compatible field type に依存します。 |
+| `findBy<&Field>()` が例外になる | `index<&Field>()` または `indexed<&Field>()` でフィールドインデックスを登録していません。 |
+| 新しく登録したインデックスが古い行を見つけない | インデックス登録は既存行を自動反映しません。登録後に行を書き直します。 |
+| `Ref<T>` が解決できない | 参照が未接続、参照先テーブルがスキーマ / 接続情報に登録されていない、または参照先行が削除されています。 |
+| `foreignKey<&RefField>()` が参照先テーブル未登録で失敗する | スキーマに参照先エンティティのテーブルが含まれていません。 |
+| `SetNull` の設定が失敗する | 参照元フィールドが `std::optional<T>` ではありません。 |
+| `updatePrimaryKey()` が移動先ありで失敗する | 新しい主キーが既に存在します。 |
+| 読み込んだ `Immutable<T>` フィールドの代入が失敗する | デコードまたは保存後に値が seal されています。 |
+| テーブル名変更後にデータが見えない | テーブル名はハッシュ化された保存接頭辞の一部です。 |
+| 構造体変更後にデコード前提が崩れる | BinPack の集約型エンコードはフィールド順と互換なフィールド型に依存します。 |
 
-## 最初の使い方
+## 実装時の目安
 
-最初の C++ embedding では、次の形から始めるのが扱いやすいです。
-
-1. 安定した主キー field を持つ plain struct を定義する。
-2. 保存する struct の近くに `AKKARADB_ENTITY` を書く。
-3. data directory ごとに 1 つの `AkkaraDB` を開く。
-4. table を開いた直後に index を登録する。
-5. typed filtering には `query()`、indexed equality lookup には `findBy()` を使う。
-6. row-id stability や referential action が必要な場所だけ `Ref<T>` と `Schema` を使う。
+1. 安定した主キーフィールドを持つ通常の構造体を定義する。
+2. `AKKARADB_ENTITY` で保存対象フィールドを列挙する。
+3. `AkkaraDB::open()` でデータベースを開く。
+4. テーブルを開いた直後にインデックスを登録する。
+5. 型付き絞り込みには `query()`、インデックス付き等価検索には `findBy()` を使う。
+6. 参照や外部キーが必要なら `Schema` を使ってテーブル間の関係をまとめる。

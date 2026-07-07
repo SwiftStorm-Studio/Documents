@@ -3,27 +3,27 @@ title: 低レベル API
 description: AkkEngine、API サーバー、Cluster、VersionLog を含む Native 低レベル層。
 ---
 
-低レベル API セクションは、Native の engine 層を直接扱うための場所です。byte 指向の保存制御、別プロセスからの engine access、replication/runtime、履歴と rollback primitive を扱いたい場合に使います。
+低レベル API セクションは、Native のエンジン層を直接扱うための場所です。バイト列指向のストレージ制御、別プロセスからのエンジンアクセス、レプリケーション runtime、履歴とロールバックの基本操作を扱いたい場合に使います。
 
 ## コンポーネント
 
-| Component | 読む内容 |
+| コンポーネント | 読む内容 |
 |---|---|
-| `AkkEngine` | byte key/value の基本操作、scan、設定、統計、storage behavior、engine lifecycle。 |
-| API サーバー | HTTP、TCP、gRPC から `AkkEngine` instance を扱う方法。 |
-| Cluster | Primary / Replica runtime、replication、routing、node configuration。 |
-| VersionLog | 履歴、過去時点読み取り、rollback、file layout、運用上の制限。 |
+| `AkkEngine` | バイト列キー / 値の基本操作、スキャン、設定、統計、ストレージ挙動、エンジンのライフサイクル。 |
+| API サーバー | HTTP、TCP、gRPC から `AkkEngine` インスタンスを扱う方法。 |
+| Cluster | Primary / Replica runtime、レプリケーション、ルーティング、ノード設定。 |
+| VersionLog | 履歴、過去時点読み取り、ロールバック、ファイル配置、運用上の制限。 |
 
 ## 目的別に読む
 
 | 目的 | ページ |
 |---|---|
 | `AkkEngine` を直接使う | [AkkEngine の使い方](/akkaradb-native/ja/api/low-level/akkengine/usage/) |
-| engine の storage path を理解する | [AkkEngine のアーキテクチャ](/akkaradb-native/ja/api/low-level/akkengine/architecture/) |
-| engine options を設定する | [AkkEngine の設定オプション](/akkaradb-native/ja/api/low-level/options/) |
-| runtime counters を読む | [AkkEngine の統計情報](/akkaradb-native/ja/api/low-level/stats/) |
-| engine を network API として公開する | [API サーバー](/akkaradb-native/ja/api/low-level/api-server/) |
-| Primary / Replica replication を動かす | [Cluster](/akkaradb-native/ja/api/low-level/cluster/) |
-| 履歴と rollback を使う | [VersionLog](/akkaradb-native/ja/api/low-level/version-log/) |
+| エンジンの保存経路を理解する | [AkkEngine のアーキテクチャ](/akkaradb-native/ja/api/low-level/akkengine/architecture/) |
+| エンジンオプションを設定する | [AkkEngine の設定オプション](/akkaradb-native/ja/api/low-level/options/) |
+| 実行時カウンタを読む | [AkkEngine の統計情報](/akkaradb-native/ja/api/low-level/stats/) |
+| エンジンをネットワーク API として公開する | [API サーバー](/akkaradb-native/ja/api/low-level/api-server/) |
+| Primary / Replica のレプリケーションを動かす | [Cluster](/akkaradb-native/ja/api/low-level/cluster/) |
+| 履歴とロールバックを使う | [VersionLog](/akkaradb-native/ja/api/low-level/version-log/) |
 
-C++ struct と table 風の操作が主目的なら、高レベル API を使う方が自然です。
+C++ 構造体とテーブル風の操作が主目的なら、高レベル API を使う方が自然です。
