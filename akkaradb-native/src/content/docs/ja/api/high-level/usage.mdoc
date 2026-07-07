@@ -189,6 +189,12 @@ profiles.indexed<&Profile::email>()
         .indexed<&Profile::name>();
 ```
 
+文字列 prefix search 用には、通常のフィールドインデックスとは別に `prefixIndexed<&Field>()` を登録します。string-like field 専用で、`findBy<&Field>()` には使われません。頻繁な `startsWith()` や、単純な末尾 `%` の `like("prefix%")` に使います。
+
+```cpp
+profiles.prefixIndexed<&Profile::email>();
+```
+
 `findBy<&Field>(value)` は最初に見つかったエンティティを返します。このフィールドのインデックスが登録されている必要があります。
 
 インデックスは `put()`、`remove()`、`updatePrimaryKey()` のときに更新されます。既存行に対する自動反映はないため、インデックスはそのインデックスで探したい行を書く前に登録します。
@@ -215,6 +221,8 @@ auto result = profiles
 | `count()` | 一致件数を数えます。 |
 | `toVector()` | 一致した項目を `std::vector` に展開します。 |
 
+クエリ結果の順序は安定した API 契約ではありません。順序が必要な場合は、実体化した結果をアプリケーション側で sort します。
+
 ### インデックスを使う計画
 
 計画器は、登録済みインデックスを使える述語を探します。返す前には常に完全な式で絞り込むため、インデックスは候補集合を狭める役割です。
@@ -228,11 +236,15 @@ auto result = profiles
 | `field.notIn(values)` | フィールドインデックス全体をスキャンし、式で絞り込みます。 |
 | `field.isNull()` | 空の `optional` に対応するエンコード済み値の等価範囲。 |
 | `field.isNotNull()` | フィールドインデックス全体をスキャンし、式で絞り込みます。 |
-| `startsWith`、`contains` | 現在の実装ではフィールドインデックス全体をスキャンし、式で絞り込みます。 |
+| `startsWith` | `prefixIndexed<&Field>()` があれば prefix index の範囲。なければ通常のフィールドインデックス全体を scan し、式で絞り込みます。 |
+| `contains` | フィールドインデックス全体を scan し、式で絞り込みます。 |
 | `like("exact")` | 等価範囲。 |
-| `like("prefix%")` | 現在の実装ではフィールドインデックス全体をスキャンし、式で絞り込みます。 |
-| `&&` の中の述語 | 計画器が使えるインデックス側を選ぶことがあります。 |
-| `||`、ネストしたフィールド、map からの値取得 | 正しく評価されますが、別の利用可能なインデックス付き述語がない限りテーブルスキャンへフォールバックします。 |
+| `like("prefix%")` | 単純な prefix pattern で `prefixIndexed<&Field>()` があれば prefix index の範囲。なければ通常のフィールドインデックス全体を scan し、式で絞り込みます。 |
+| `&&` の中の述語 | 計画器が使えるインデックス側を score で選びます。 |
+| `||` の中の述語 | 両辺とも index 化できる場合、複数の index 範囲を union し、候補主キーを重複除去します。片側でも index 化できない場合は table scan に fallback します。 |
+| ネストしたフィールド、map からの値取得 | 正しく評価されますが、それ単体では現在 index 起点にはなりません。 |
+
+planner の優先順位、literal 変換、`like()` の wildcard、クエリ lambda の境界は [Query](/akkaradb-native/ja/api/high-level/query/) を参照します。
 
 ## optional / nested / map field
 

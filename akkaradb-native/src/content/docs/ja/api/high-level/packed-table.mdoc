@@ -66,7 +66,7 @@ auto byEmail = users.index<&User::email>();
 auto alice = byEmail.find("alice@example.test");
 ```
 
-`indexed<&Field>()` は連結して呼べる登録ヘルパーです。`findBy<&Field>(value)` は最初に見つかったエンティティを返し、フィールドインデックスが未登録なら例外を投げます。
+`indexed<&Field>()` は通常のフィールドインデックスを連結して登録するヘルパーです。`prefixIndexed<&Field>()` は、`startsWith()` や単純な prefix `like()` のクエリ計画に使う、別の文字列 prefix index を登録します。prefix index は string-like field 専用で、`findBy<&Field>()` には使われません。`findBy<&Field>(value)` は最初に見つかったエンティティを返し、通常のフィールドインデックスが未登録なら例外を投げます。
 
 インデックス項目は挿入、置換、削除、主キー更新で更新されます。既存行は自動的には反映されません。
 

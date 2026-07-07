@@ -20,6 +20,15 @@ struct Profile {
 AKKARADB_ENTITY(Profile, id, email, name, age);
 ```
 
+Register normal field indexes for equality, membership, and numeric range predicates. Register prefix indexes when `startsWith()` or prefix `like()` must avoid a full field-index scan.
+
+```cpp
+profiles.indexed<&Profile::email>()
+        .indexed<&Profile::age>()
+        .indexed<&Profile::name>()
+        .prefixIndexed<&Profile::email>();
+```
+
 ## Basic Query
 
 ```cpp
@@ -42,6 +51,8 @@ auto adults = profiles
 | `count()` | Counts matched rows. |
 | `toVector()` | Materializes matched entries. |
 
+Query result order is not a stable API contract. Table scans, index scans, multi-range `IN`, and `OR` union plans may expose different engine scan orders. Sort the materialized result in application code when order matters.
+
 ## Supported Expressions
 
 | Expression | Example |
@@ -58,23 +69,92 @@ auto adults = profiles
 
 Nested fields require `template field<...>()` because the proxy expression is a dependent template call.
 
+## Lambda Boundary
+
+The lambda passed to `query()` is called with a query proxy, not a real entity. It must return a query expression built from proxy fields and supported operators.
+
+```cpp
+auto adults = profiles.query([](auto profile) {
+    return profile.age >= 18 && profile.email.endsWith(".test"); // not supported
+});
+```
+
+Arbitrary runtime control flow is not converted into a query expression. Keep predicates in expression form. Helper functions are fine only when they return query expressions over proxy fields; helpers that compute a runtime `bool` from a real entity are not query predicates.
+
 ## Index Planning
 
-The planner looks for a registered index that can reduce the candidate set. The full expression is still evaluated before a row is returned.
+The planner looks for registered indexes that can reduce the candidate set. The full expression is still evaluated before a row is returned, so an index plan changes scan cost, not query semantics.
 
 | Predicate | Plan |
 |---|---|
-| `field == literal` | Equality index range. |
-| numeric range | Ordered index range for arithmetic non-`bool` fields. |
-| `field.in(values)` | Multiple equality ranges with candidate primary-key dedupe. |
-| `field != literal`, `notIn`, `isNotNull` | Full field-index scan plus expression filtering. |
-| `isNull` | Equality range for encoded empty optional. |
-| string `contains`, `startsWith`, some `like` forms | Full field-index scan plus expression filtering in the current implementation. |
-| `AND` | Planner may choose a usable indexed side. |
-| `OR` | Correctly evaluated, but not currently a multi-index union plan by itself. |
+| `field == literal` | Equality range over a normal field index. |
+| numeric `field >/>=/</<= literal` | Ordered range over a normal field index for arithmetic non-`bool` fields. |
+| `field.in(values)` | One equality range per convertible value, with candidate primary-key dedupe. |
+| `field != literal`, `notIn`, `isNotNull` | Full normal field-index scan plus expression filtering. |
+| `isNull` | Equality range for the encoded empty optional on a normal field index. |
+| `startsWith("prefix")` | Prefix-index range when `prefixIndexed<&Field>()` is registered; otherwise a full normal field-index scan if `indexed<&Field>()` is registered. |
+| `like("prefix%")` | Prefix-index range when the pattern is a simple trailing `%` prefix and `prefixIndexed<&Field>()` is registered; otherwise a full normal field-index scan if available. |
+| `like("exact")` | Equality range over a normal field index. |
+| `contains` | Full normal field-index scan plus expression filtering. |
+| `AND` | The planner evaluates both sides and chooses the higher-scoring usable index plan. |
+| `OR` | If both sides can produce index plans, the planner scans the union of their ranges and deduplicates candidate primary keys. If either side cannot be indexed, the query falls back to table scan. |
 
-If no usable index is registered, the query scans the table range.
+## Planner Priority
+
+When an `AND` expression contains multiple usable index plans, the planner uses a simple score to pick the candidate source. The relative priority is:
+
+| Plan kind | Relative score |
+|---|---:|
+| Equality | 100 |
+| String prefix index | 95 |
+| `IN` equality ranges | 90 |
+| Optional `isNull` equality | 85 |
+| Ordered numeric range | 80 |
+| `OR` union | 70 |
+| Full field-index scan | 10 |
+
+These scores are only a heuristic for choosing the scan source. They are not a cost model based on table cardinality or index selectivity.
+
+## Literal Conversion
+
+Index ranges are built only when the literal can be converted to the field type.
+
+| Field/literal case | Behavior |
+|---|---|
+| `std::string` field with string-like literal | Converts through `std::string_view`. |
+| Arithmetic field with arithmetic literal | Converts if the value fits in the field type. Negative values do not convert to unsigned fields. |
+| Constructible or convertible field type | Uses construction or assignment conversion. |
+| Unconvertible literal | The predicate cannot seed that index plan. |
+| `IN` values | Each convertible value creates an equality range; unconvertible values are skipped. |
+
+The full query expression is still evaluated after loading candidates. Literal conversion only decides whether an index range can be produced.
+
+## LIKE Semantics
+
+`like()` supports SQL-style wildcard matching:
+
+| Pattern token | Meaning |
+|---|---|
+| `%` | Matches zero or more characters. |
+| `_` | Matches exactly one character. |
+| Any other character | Matches itself. |
+
+There is no documented escape syntax for treating `%` or `_` as literal wildcard characters.
+
+Only a simple trailing-percent pattern such as `like("abc%")` can use a prefix index. Patterns such as `like("%abc")`, `like("a_c%")`, `like("a%b%")`, or `like("abc_")` are still evaluated correctly, but they cannot use the prefix-index range optimization.
+
+## Planner Tradeoffs
+
+`AND` can safely use one indexed side because the remaining predicate is applied after loading each candidate row. `OR` needs both sides to be indexable; using only one side would miss rows that match the unindexed branch.
+
+An `OR` union plan is not always small. Branches such as `!=`, `notIn`, `isNotNull`, and `contains` may produce full field-index scans. The union plan remains correct, but it can still scan many index entries.
+
+Prefix indexes are separate from normal field indexes. They are string-like-field only, do not serve `findBy<&Field>()`, and do not replace normal field indexes for equality or numeric range planning. They add extra write/delete/update maintenance for the indexed string field, but keep prefix search keys compact and avoid overloading the normal field-index layout.
+
+Indexes and prefix indexes are not backfilled over existing rows. Register them immediately after opening a table and before writing rows that should be visible through those indexes.
+
+If no usable index plan is available, the query scans the table range and evaluates the expression for each row.
 
 ## Practical Rules
 
-Register indexes immediately after opening a table. Use query predicates for readability, then add indexes for predicates that must avoid full table scans. Keep map and nested-field predicates for expressiveness, but do not assume they are index-seeded unless a top-level indexed predicate is also present.
+Register indexes immediately after opening a table. Add `indexed<&Field>()` for exact lookup, `IN`, negative membership, and numeric range predicates. Add `prefixIndexed<&Field>()` separately for hot `startsWith()` or simple `like("prefix%")` predicates. Keep map and nested-field predicates for expressiveness, but do not assume they are index-seeded unless a top-level indexed predicate is also present.

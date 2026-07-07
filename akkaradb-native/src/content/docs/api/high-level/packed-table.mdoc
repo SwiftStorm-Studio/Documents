@@ -66,7 +66,7 @@ auto byEmail = users.index<&User::email>();
 auto alice = byEmail.find("alice@example.test");
 ```
 
-`indexed<&Field>()` is a chainable registration helper. `findBy<&Field>(value)` returns the first matching entity and throws if the field index was not registered.
+`indexed<&Field>()` is a chainable registration helper for normal field indexes. `prefixIndexed<&Field>()` registers a separate string prefix index for `startsWith()` and simple prefix `like()` query planning. Prefix indexes are string-like-field only and do not serve `findBy<&Field>()`. `findBy<&Field>(value)` returns the first matching entity and throws if the normal field index was not registered.
 
 Index entries are updated on insert, replacement, remove, and primary-key update. Existing rows are not backfilled automatically.
 

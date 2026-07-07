@@ -141,7 +141,7 @@ Supported expression families include:
 
 The planner can use registered indexes for suitable predicates. The returned rows are still filtered by the complete expression, so an index narrows the candidate set without changing query semantics.
 
-The planner recursively searches `AND` expressions for a usable indexed predicate. It can create equality ranges, ordered numeric ranges, multiple `IN` ranges, null ranges for optional fields, or a full field-index scan for predicates such as `!=`, `notIn`, `isNotNull`, `contains`, and some `like` forms. `OR` is evaluated correctly but does not currently become a multi-index union plan by itself.
+The planner recursively searches `AND` expressions, scores usable indexed predicates, and chooses the stronger candidate source. It can create equality ranges, ordered numeric ranges, multiple `IN` ranges, null ranges for optional fields, prefix-index ranges for `startsWith` and simple `like("prefix%")`, or a full field-index scan for predicates such as `!=`, `notIn`, `isNotNull`, and `contains`. For `OR`, both sides must be indexable; when they are, the plan scans the union of their index ranges and deduplicates candidate primary keys. If either side of an `OR` is not indexable, the planner falls back to a table scan to avoid missing rows.
 
 ## Row-Id Metadata
 

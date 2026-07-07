@@ -141,7 +141,7 @@ profiles.query([](auto profile) {
 
 計画器は、登録済みインデックスを使える述語を探します。返される行は常に完全な式で絞り込まれるため、インデックスは候補集合を狭める役割です。
 
-計画器は `AND` 式の中を再帰的に探し、使えるインデックス付き述語を見つけます。等価範囲、数値の順序付き範囲、複数の `IN` 範囲、optional フィールドの null 範囲、または `!=`、`notIn`、`isNotNull`、`contains`、一部の `like` のようなフィールドインデックス全体のスキャンを作れます。`OR` は正しく評価されますが、現状それ単体では複数インデックスの union plan にはなりません。
+計画器は `AND` 式の中を再帰的に探し、使えるインデックス付き述語を score で選びます。等価範囲、数値の順序付き範囲、複数の `IN` 範囲、optional フィールドの null 範囲、`startsWith` や単純な `like("prefix%")` 向けの prefix index 範囲、または `!=`、`notIn`、`isNotNull`、`contains` のようなフィールドインデックス全体の scan を作れます。`OR` は両辺が index 化できる場合だけ、複数の index 範囲を union して候補主キーを重複除去します。片側でも index 化できない場合は、取りこぼしを避けるため table scan に fallback します。
 
 ## 行 ID メタデータ
 
