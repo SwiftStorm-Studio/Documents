@@ -69,17 +69,19 @@ Query result order is not a stable API contract. Table scans, index scans, multi
 
 Nested fields require `template field<...>()` because the proxy expression is a dependent template call.
 
-## Lambda Boundary
+## Query Lambda Boundary
 
 The lambda passed to `query()` is called with a query proxy, not a real entity. It must return a query expression built from proxy fields and supported operators.
 
 ```cpp
 auto adults = profiles.query([](auto profile) {
-    return profile.age >= 18 && profile.email.endsWith(".test"); // not supported
+    return profile.age >= 18 && profile.email.endsWith(".test"); // endsWith is not a query operator
 });
 ```
 
-Arbitrary runtime control flow is not converted into a query expression. Keep predicates in expression form. Helper functions are fine only when they return query expressions over proxy fields; helpers that compute a runtime `bool` from a real entity are not query predicates.
+The lambda itself is ordinary C++ and can use local constants or helper functions. The boundary is the return value: it must be an expression type that the query API understands. For example, `startsWith()`, `contains()`, and `like()` are supported string operators, but `endsWith()` is not currently part of the query DSL.
+
+Arbitrary entity predicates are not converted into query expressions. Keep predicates in expression form. Helper functions are fine only when they return query expressions over proxy fields; helpers that compute a runtime `bool` from a real entity are not query predicates.
 
 ## Index Planning
 

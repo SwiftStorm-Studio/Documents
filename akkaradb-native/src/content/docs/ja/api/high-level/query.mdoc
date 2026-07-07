@@ -69,17 +69,19 @@ auto adults = profiles
 
 ネストしたフィールドは依存名のテンプレート呼び出しになるため、`template field<...>()` と書きます。
 
-## ラムダの境界
+## クエリラムダの境界
 
 `query()` に渡すラムダは、実体のエンティティではなくクエリプロキシを受け取ります。戻り値は、プロキシフィールドと対応済み演算子から作られたクエリ式である必要があります。
 
 ```cpp
 auto adults = profiles.query([](auto profile) {
-    return profile.age >= 18 && profile.email.endsWith(".test"); // 未対応
+    return profile.age >= 18 && profile.email.endsWith(".test"); // endsWith は query operator ではありません
 });
 ```
 
-任意の実行時制御フローがクエリ式へ変換されるわけではありません。predicate は expression の形で書きます。helper 関数を使う場合も、その helper がプロキシフィールド上のクエリ式を返す必要があります。実体エンティティから runtime `bool` を計算する helper は、そのままではクエリ predicate になりません。
+ラムダ自体は通常の C++ なので、ローカル定数や helper 関数は使えます。境界になるのは戻り値です。戻り値は query API が理解できる expression type である必要があります。たとえば `startsWith()`、`contains()`、`like()` は対応済みの文字列 operator ですが、`endsWith()` は現時点の query DSL にはありません。
+
+任意のエンティティ predicate がクエリ式へ変換されるわけではありません。predicate は expression の形で書きます。helper 関数を使う場合も、その helper がプロキシフィールド上のクエリ式を返す必要があります。実体エンティティから runtime `bool` を計算する helper は、そのままではクエリ predicate になりません。
 
 ## インデックス計画
 
