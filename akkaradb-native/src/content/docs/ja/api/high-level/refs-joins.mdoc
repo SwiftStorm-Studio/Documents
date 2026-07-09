@@ -1,13 +1,13 @@
 ---
 title: Ref と Join
-description: 行 ID 参照、遅延解決、dirty ref、型付き結合ビュー。
+description: 行 ID 参照、遅延解決、dirty ref の保存、型付き join view、query bytecode との境界。
 ---
 
-`Ref<T>` は高レベル API の参照型です。別のエンティティを、安定した行 ID または主キーで解決するための情報を持ち、テーブルの接続情報を通して参照先を遅延読み込みできます。
+`Ref<T>` は高レベル API の参照型です。別のエンティティを安定した行 ID または主キーから解決するための情報を持ち、table binding を通して参照先を遅延読み込みできます。
 
-## 参照用 trait
+## 参照 trait
 
-参照される型には `RefTraits<T>` が必要です。これは `AKKARADB_ENTITY` が生成します。
+参照される型には `RefTraits<T>` が必要です。`AKKARADB_ENTITY` はこれを生成します。
 
 ```cpp
 struct Author {
@@ -33,38 +33,16 @@ authors.put({1, "Alice"});
 posts.put({100, akkaradb::ref<Author>(1), "Hello"});
 ```
 
-テーブルまたはスキーマが `Author` の接続情報を持っていれば、`Ref` は必要になった時点で参照先を解決できます。
+table または schema が `Author` の binding を持っていれば、ref は必要になった時点で遅延解決できます。
 
 ```cpp
 auto post = posts.get(100);
 auto name = post->author->name;
 ```
 
-## 参照の状態
+## Join
 
-| 状態 | 意味 |
-|---|---|
-| キーが分かっている | `id()` をテーブル検索なしで返せます。 |
-| 行 ID が分かっている | `rowId()` を返せます。必要なら行 ID の対応表から現在の主キーを解決します。 |
-| 読み込み済み | `operator->` と `operator*` で参照先の値へアクセスできます。 |
-| dirty | owner を保存する前に、参照先の値も保存する必要があります。 |
-| 接続済み | 遅延解決に使うテーブル接続情報を持っています。 |
-
-完全なエンティティから `Ref<T>` を作ると、参照は dirty になります。`PackedTable::put()` は owner のエンティティを書き込む前に、dirty な参照先を保存します。
-
-## 主キーの変更
-
-テーブルは `pk2row` と `row2pk` の対応表を維持するため、`Ref` は主キーの変更をまたいでも安定します。
-
-```cpp
-authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
-```
-
-既存の `Ref<Author>` は、見えている主キーが変わった後も行 ID 経由で解決できます。
-
-## 結合
-
-結合は、スキャンと検索の上にある型付きの読み取りビューです。
+join は scan と lookup の上にある型付き read view です。
 
 ```cpp
 auto rows = posts
@@ -75,18 +53,58 @@ auto rows = posts
     .toVector();
 ```
 
-通常フィールド同士で結合する場合は、左右のメンバポインタを指定します。
+plain field 同士で join する場合は、左右両方の field を指定します。
 
 ```cpp
 auto rows = posts.join<&PlainPost::authorId, &Author::id>(authors).toVector();
 ```
 
-## 実行の形
+各 join row は左側の `Entry` と decode 済みの右側エンティティを持ちます。`where()`、`first()`、`any()`、`count()`、`toVector()` は join view 上で評価されます。
 
-| 結合形式 | 実行の形 |
+## 実用上の目安
+
+owner row が primary key 変更後も同じ logical target を追跡してほしい場合は `Ref<T>` を使います。見えている key を保存して比較するだけなら plain foreign-key field の方が単純です。
+
+ref field には `join<&RefField>(right)`、plain field には `join<&LeftField, &RightField>(right)` を使います。大きな relation-heavy workload では、hot path を明示的な index や application-level materialized view として設計する方が向いています。
+
+## Advanced
+
+### Ref の状態
+
+| 状態 | 意味 |
 |---|---|
-| `join<&RefField>(right)` | 左テーブルをスキャンし、右テーブルを行 ID で検索します。 |
-| `join<&LeftField, &RightPk>(right)` | 左テーブルをスキャンし、右テーブルを主キーで検索します。 |
-| `join<&LeftField, &RightField>(right)` | 左テーブルをスキャンし、対応する値を探すために右テーブルもスキャンします。 |
+| key known | `id()` が row-id lookup なしで返せます。 |
+| row id known | `rowId()` が返せるか、metadata から解決できます。 |
+| loaded | `operator->` と `operator*` で値へアクセスできます。 |
+| dirty | owner を保存する前に、参照先の値も保存する必要があります。 |
+| attached | 遅延解決に使う table binding が利用できます。 |
 
-結合ヘルパーは専用の結合実行計画を作るものではありません。大量の関連データを頻繁に読む場合は、明示的なインデックスやアプリケーション側の読み取り用テーブルを設計します。
+完全なエンティティから `Ref<T>` を作ると dirty になります。`PackedTable::put()` は owner entity を書く前に dirty ref を保存します。
+
+### primary key の変更
+
+table は `pk2row` と `row2pk` metadata を維持するため、`Ref<T>` は primary key の変更を跨いでも安定します。
+
+```cpp
+authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
+```
+
+見えている primary key が変わった後でも、既存の `Ref<Author>` は row id 経由で同じ logical entity を解決できます。
+
+### join の実行形
+
+| join 形式 | 実行の形 |
+|---|---|
+| `join<&RefField>(right)` | 左 table scan と右 table の row-id lookup。 |
+| `join<&LeftField, &RightPk>(right)` | 左 table scan と右 table の primary-key lookup。 |
+| `join<&LeftField, &RightField>(right)` | 左 table scan と、matching field を探すための右 table scan。 |
+
+join helper は native join engine plan を作りません。table scan と lookup の上にある view-level helper です。
+
+### query と bytecode の境界
+
+`Ref<T>` の遅延解決は通常の C++ 動作です。`post.author->name == "Alice"` のような predicate は別 table へ境界を跨ぐため、local raw-row field load として表現できません。
+
+Clang plugin の bytecode rewrite 経路では、`Ref<T>` crossing を含む `PackedTable::query(lambda)` は owned `HostCallBool` descriptor として出力されます。通常の遅延解決は保たれますが、その predicate は raw row evaluation できません。
+
+`BytecodeQueryView::where(lambda)` では、`Ref<T>` crossing は decode 後 filter として残ります。`where` descriptor は bytecode として合成できる必要があるためです。明示的な `join(...).where([](const Left&, const Right&) { ... })` は既存の 2 entity predicate semantics のままで、local row bytecode には rewrite されません。

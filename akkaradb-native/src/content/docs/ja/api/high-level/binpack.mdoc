@@ -1,46 +1,52 @@
 ---
 title: BinPack と互換性
-description: 高レベル API が対応する値の形と、ストレージ互換性ルール。
+description: 高レベルテーブルが対応する値の形と、ストレージ互換性のルール。
 ---
 
-高レベル API のテーブルは、エンティティを `BinPack` でエンコードします。`PackedTable` はエンコード済みのエンティティをエンジンの値として保存し、テーブル接頭辞、主キーのバイト列、インデックス値、行 ID のメタデータからキーを組み立てます。
+高レベルテーブルはエンティティを `BinPack` でエンコードします。`PackedTable` はエンコード済みエンティティをエンジンの値として保存し、table prefix、primary-key bytes、index values、row-id metadata からキーを組み立てます。
 
 ## 対応している形
 
 | 形 | 補足 |
 |---|---|
-| `bool` | 1 バイトでエンコードします。 |
-| signed / unsigned integer | 固定幅でエンコードします。主キーとインデックスでは、必要に応じて並び順を保つエンコードを使います。 |
-| `float`, `double` | 固定幅でエンコードします。インデックス値では、範囲スキャン向けに並び順を保つバイト列を使います。 |
+| `bool` | 1 byte でエンコードします。 |
+| signed / unsigned integer | 固定幅でエンコードします。primary key と index では、必要に応じて順序を保つエンコードを使います。 |
+| `float`, `double` | 固定幅でエンコードします。index values は順序を保つ浮動小数点 byte 列を使います。 |
 | `enum` | underlying integer type でエンコードします。 |
-| `std::string` | 長さ付きのバイト列としてエンコードします。 |
-| `std::string_view` | 書き込み用のアダプタです。デコードが必要な永続フィールドには使わない方が安全です。 |
-| `std::vector<T>`, `std::array<T, N>` | 要素型が対応済みである必要があります。 |
-| `std::vector<uint8_t>` | 長さ付きのバイト列としてエンコードします。 |
-| `std::map<K, V>`, `std::unordered_map<K, V>` | キー型と値型が対応済みである必要があります。 |
-| `std::optional<T>` | 存在フラグと、値がある場合のエンコード済み値を保存します。 |
+| `std::string` | 長さ付き byte 列。 |
+| `std::string_view` | 書き込み adapter のみ。decode が必要な永続フィールドには使わない方が安全です。 |
+| `std::vector<T>`, `std::array<T, N>` | 要素の型も対応している必要があります。 |
+| `std::vector<uint8_t>` | 長さ付き byte payload。 |
+| `std::map<K, V>`, `std::unordered_map<K, V>` | key と value の型が対応している必要があります。 |
+| `std::optional<T>` | 値の有無を表す byte と、値がある場合のエンコード済み値。 |
 | `std::pair<A, B>`, `std::tuple<Ts...>` | 要素ごとにエンコードします。 |
-| aggregate struct | trivially copyable な集約型は `memcpy` の高速経路を使います。それ以外は Boost.PFR のフィールド順を使います。 |
-| `akkaradb::Ref<T>` | 参照先の行 ID をエンコードします。 |
-| `akkaradb::Immutable<T>` | 包んでいる値をエンコードし、デコード時に immutable value として seal します。 |
+| aggregate struct | trivially copyable な aggregate は memcpy fast path、それ以外は Boost.PFR のフィールド宣言順。 |
+| `akkaradb::Ref<T>` | 参照先 row id をエンコードします。 |
+| `akkaradb::Immutable<T>` | 内側の値をエンコードし、decode 時に sealed value として返します。 |
 
-## 互換性ルール
+## 実用ルール
 
-`BinPack` は小さく直接的なエンコードです。自己記述的なスキーマ移行形式ではありません。
+エンティティのレイアウトはストレージ形式として扱います。テーブル名の変更、primary key の型変更、フィールド順序の変更、フィールド型の変更は migration として扱ってください。
 
-次の変更はストレージ移行として扱います。
+## Advanced
+
+### 互換性ルール
+
+`BinPack` は小さく直接的なエンコード形式です。自己記述的な schema migration format ではありません。
+
+次の変更はストレージ migration として扱います。
 
 - テーブル名の変更
-- 主キー型の変更
-- 集約型フィールドの並べ替え
+- primary key の型変更
+- aggregate のフィールド順序変更
 - フィールド型の変更
-- 既存の集約型からのフィールド削除
-- `Ref<T>` 参照先の主キーモデル変更
-- 外部キー動作に関わる optional / null の意味変更
+- 既存 aggregate からのフィールド削除
+- `Ref<T>` target の primary-key model 変更
+- foreign-key action で使う optional / null の意味変更
 
-## 集約型のレイアウト
+### aggregate のレイアウト
 
-非 trivial な集約型では、Boost.PFR が宣言順にフィールドを走査します。
+non-trivial な aggregate struct では、Boost.PFR が宣言順にフィールドを辿ります。
 
 ```cpp
 struct UserV1 {
@@ -50,23 +56,23 @@ struct UserV1 {
 };
 ```
 
-途中にフィールドを追加すると、その後ろのバイト配置が変わります。永続データでは、明示的なバージョン付けか、制御された書き換えを使います。
+途中にフィールドを追加すると、それ以降の byte layout が変わります。永続化済みデータでは、明示的な versioning か管理された rewrite を使ってください。
 
-## インデックスのエンコード
+### インデックスのエンコード
 
-フィールドインデックスは、インデックス対象フィールドの値をインデックスキーへエンコードします。数値と浮動小数点のフィールドは、範囲スキャンのために並び順を保つバイト列へ変換されます。`Immutable<T>` は包んでいる値を、`Ref<T>` は参照先の行 ID をインデックス化します。
+field index はインデックス対象フィールドの値を index key にエンコードします。数値や浮動小数点フィールドは ordered scan のために順序を保つ byte 列を使います。`Immutable<T>` は内側の値、`Ref<T>` は参照先 row id を index 化します。
 
-つまり、インデックスの互換性はフィールドのエンコード表現に従います。互換性のないフィールド変更の後は、インデックスの再構築が必要です。
+つまり index compatibility はフィールドのエンコード表現に従います。互換性のないフィールド変更の後は index rebuild が必要です。
 
-## 実用的な移行手順
+### 実用的な migration pattern
 
-制御された変更では、次の流れが扱いやすいです。
+管理された変更では、次の流れが扱いやすいです。
 
-1. 古い構造体で古いテーブルを開く。
-2. 行をスキャンする。
-3. 各行を新しい構造体へ変換する。
-4. 新しいテーブル名、または一時データベースへ書き込む。
-5. 変換済み行を書き込む前にインデックスを登録する。
-6. 検証後にアプリケーションコードを切り替える。
+1. 旧 struct で旧 table を開く。
+2. 行を scan する。
+3. 各行を新 struct に変換する。
+4. 新しい table name または一時 database に書き込む。
+5. 変換済みの行を書き込む前に index を登録する。
+6. 検証後に application code を切り替える。
 
-小さな組み込みデータセットでは、保存済みバイト列をその場で修正するより、全件書き換えの方が単純で安全なことが多いです。
+小さな embedded dataset では、byte 列をその場で patch するより full rewrite の方が単純で安全なことが多いです。

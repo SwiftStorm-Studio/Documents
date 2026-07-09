@@ -52,7 +52,9 @@ The source field and target field must be comparable. The target field cannot be
 
 Only one delete action and one update action can be selected. `SetNull` requires `std::optional<T>`.
 
-## Cost And Boundaries
+## Advanced
+
+### Cost And Boundaries
 
 Foreign-key validation on source `put()` checks the target. For non-primary target fields, validation can use a target-side index.
 
@@ -60,7 +62,7 @@ Delete and update actions scan the source table to find referencing rows. This i
 
 For large tables, add an explicit source-side index or maintain an application-level lookup table if foreign-key actions are on a hot path.
 
-## Failure Modes
+### Failure Modes
 
 | Symptom | Likely cause |
 |---|---|

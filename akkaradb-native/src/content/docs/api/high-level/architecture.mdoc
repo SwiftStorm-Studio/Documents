@@ -108,7 +108,7 @@ The API does not backfill indexes automatically. Index registration affects futu
 
 ## Query Model
 
-The C++ query API builds expression types through overloaded operators and field proxy objects.
+The default C++ query API builds expression types through overloaded operators and field proxy objects.
 
 ```cpp
 profiles.query([](auto profile) {
@@ -117,6 +117,8 @@ profiles.query([](auto profile) {
 ```
 
 `AKKARADB_QUERYABLE` creates an `akkaradbQueryProxy()` overload for the entity. `query()` calls the predicate with that proxy and stores the resulting expression tree in `QueryView`.
+
+Native builds may also run the optional `akkara-query` Clang plugin. Supported typed lambdas are rewritten to `CompiledQueryDescriptor<T>` bytecode descriptors. A bytecode query view evaluates directly against row bytes when all fields have raw readers, and otherwise decodes the entity and runs the same VM.
 
 Supported expression families include:
 
@@ -142,6 +144,8 @@ Supported expression families include:
 The planner can use registered indexes for suitable predicates. The returned rows are still filtered by the complete expression, so an index narrows the candidate set without changing query semantics.
 
 The planner recursively searches `AND` expressions, scores usable indexed predicates, and chooses the stronger candidate source. It can create equality ranges, ordered numeric ranges, multiple `IN` ranges, null ranges for optional fields, prefix-index ranges for `startsWith` and simple `like("prefix%")`, or a full field-index scan for predicates such as `!=`, `notIn`, `isNotNull`, and `contains`. For `OR`, both sides must be indexable; when they are, the plan scans the union of their index ranges and deduplicates candidate primary keys. If either side of an `OR` is not indexable, the planner falls back to a table scan to avoid missing rows.
+
+Bytecode `where` descriptors are composed into the existing descriptor with logical `AND`. Composed descriptors keep host-call and custom-opcode capture pointers per call or binding, so independently captured descriptors can be combined without forcing one shared capture pointer.
 
 ## Row-Id Metadata
 
@@ -180,6 +184,8 @@ Join helpers are typed read views, not a native join engine.
 | `join<&LeftField, &RightField>(right)` | Scans left and scans right for matching fields. |
 
 Each join row contains the left `Entry` and the decoded right entity. `where()`, `first()`, `any()`, `count()`, and `toVector()` are evaluated in the view.
+
+Query bytecode does not traverse `Ref<T>` as a local row field. A predicate that crosses a ref uses normal C++ lazy resolution through host-call fallback in `query(...)`, remains a decoded filter in `where(...)`, or should be expressed through an explicit `join(...).where(...)` when both entities are part of the predicate.
 
 ## Schema Hooks
 

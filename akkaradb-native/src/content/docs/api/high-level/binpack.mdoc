@@ -24,7 +24,13 @@ High-level tables encode entities with BinPack. `PackedTable` stores one encoded
 | `akkaradb::Ref<T>` | Encodes the referenced row id. |
 | `akkaradb::Immutable<T>` | Encodes the wrapped value and decodes as sealed. |
 
-## Compatibility Rules
+## Practical Rule
+
+Treat entity layout as storage format. Renaming a table, changing a primary-key type, reordering fields, or changing field types should be handled as a migration.
+
+## Advanced
+
+### Compatibility Rules
 
 BinPack is compact and direct. It is not a self-describing schema migration format.
 
@@ -38,7 +44,7 @@ Treat these as storage migrations:
 - changing a `Ref<T>` target's primary-key model
 - changing optional/null semantics used by foreign-key actions
 
-## Aggregate Layout
+### Aggregate Layout
 
 For non-trivial aggregate structs, Boost.PFR walks fields in declaration order.
 
@@ -52,13 +58,13 @@ struct UserV1 {
 
 Adding a field in the middle changes the byte layout for everything after it. For persisted data, prefer explicit versioning or a controlled rewrite.
 
-## Index Encoding
+### Index Encoding
 
 Field indexes encode the indexed field value into the index key. Numeric and floating-point fields use sortable bytes so ordered scans can work. `Immutable<T>` indexes the wrapped value. `Ref<T>` indexes the referenced row id.
 
 This means index compatibility follows the field's encoded representation. Rebuilding indexes is required after incompatible field changes.
 
-## Practical Migration Pattern
+### Practical Migration Pattern
 
 For a controlled change:
 

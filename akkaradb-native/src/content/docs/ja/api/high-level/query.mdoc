@@ -1,9 +1,13 @@
 ---
 title: Query
-description: C++ の型付きクエリ式、QueryView のメソッド、インデックス計画の挙動。
+description: C++ の型付きクエリ式、bytecode rewrite、QueryView の操作、インデックス計画。
 ---
 
-高レベルのクエリ API は、C++ の演算子オーバーロードとプロキシオブジェクトで型付きの式をコンパイル時に組み立てます。実行時ラムダ解釈やコンパイラプラグインは使いません。
+高レベルのクエリ API には 2 つの実行経路があります。
+
+通常の C++ API は、演算子オーバーロードとフィールド proxy から型付きの式オブジェクトを作ります。この経路では `[](auto row) { ... }` のような lambda を使い、コンパイラ plugin は不要です。
+
+Native build では、任意で `akkara-query` Clang plugin を sidecar rewrite pass として使えます。この経路では、対応している型付き lambda、たとえば `[](const Profile& row) { ... }` がコンパイル時に bytecode descriptor へ変換されます。可能な場合は、エンコード済みの行 byte 列を直接評価します。
 
 ## 準備
 
@@ -20,7 +24,7 @@ struct Profile {
 AKKARADB_ENTITY(Profile, id, email, name, age);
 ```
 
-等価、`IN`、数値範囲などに使う通常のフィールドインデックスは `indexed<&Field>()` で登録します。`startsWith()` や単純な prefix `like()` を高速化したい文字列フィールドには、別途 `prefixIndexed<&Field>()` を登録します。
+等価比較、`IN`、数値範囲に使うフィールドは `indexed<&Field>()` で登録します。`startsWith()` や prefix 型の `like()` を高速化したい文字列フィールドには、別途 `prefixIndexed<&Field>()` を登録します。
 
 ```cpp
 profiles.indexed<&Profile::email>()
@@ -40,100 +44,134 @@ auto adults = profiles
     .toVector();
 ```
 
-`query()` は `QueryView` を返します。反復するか終端メソッドを呼ぶまで遅延評価されます。
+`query()` は遅延評価される view を返します。反復するか終端メソッドを呼ぶまで評価されません。
 
-| Method | 結果 |
+| メソッド | 結果 |
 |---|---|
-| `where(fn)` | 述語を論理 `AND` で追加します。 |
+| `where(fn)` | 条件を論理 `AND` で追加します。 |
 | `limit(n)` | 一致した行数を制限します。 |
 | `first()` | `std::optional<Entry>` を返します。 |
 | `any()` | `bool` を返します。 |
 | `count()` | 一致した行数を数えます。 |
-| `toVector()` | 一致したエントリを実体化します。 |
+| `toVector()` | 一致した entry を実体化します。 |
 
-クエリ結果の順序は安定した API 契約ではありません。table scan、index scan、複数 range の `IN`、`OR` union plan では、エンジンの scan 順がそのまま見えることがあります。順序が必要な場合は、`toVector()` 後にアプリケーション側で sort します。
+クエリ結果の順序は安定した API 契約ではありません。順序が必要な場合は、実体化した後にアプリケーション側で sort してください。
 
 ## 対応している式
 
 | 式 | 例 |
 |---|---|
-| 等価と比較 | `profile.age >= 18` |
+| 等価比較と大小比較 | `profile.age >= 18` |
 | 論理演算子 | `profile.age >= 18 && profile.name != "Bob"` |
-| リストに含まれる | `profile.name.in({"Alice", "Carol"})` |
-| リストに含まれない | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
+| リスト包含 | `profile.name.in({"Alice", "Carol"})` |
+| リスト非包含 | `profile.age.notIn(std::vector<uint32_t>{17, 41})` |
 | 文字列 prefix / search | `profile.email.startsWith("a@")`, `profile.email.contains("@")` |
-| SQL 風の文字列パターン | `profile.email.like("a@%")` |
-| optional の確認 | `profile.nickname.isNull()` |
-| ネストしたフィールド | `user.address.template field<&Address::city>() == "Tokyo"` |
+| SQL 風 pattern | `profile.email.like("a@%")` |
+| optional check | `profile.nickname.isNull()` |
+| nested field | `user.address.template field<&Address::city>() == "Tokyo"` |
 | map lookup | `user.tags.get("tier") == std::optional<std::string>{"gold"}` |
 
-ネストしたフィールドは依存名のテンプレート呼び出しになるため、`template field<...>()` と書きます。
+nested field は dependent template call になるため、`template field<...>()` と書きます。
 
-## クエリラムダの境界
+## Native bytecode rewrite
 
-`query()` に渡すラムダは、実体のエンティティではなくクエリプロキシを受け取ります。戻り値は、プロキシフィールドと対応済み演算子から作られたクエリ式である必要があります。
+`akkara-query` Clang plugin を使うと、型付き entity lambda を `akkaradb::query::bytecode::CompiledQueryDescriptor<T>` に rewrite できます。
 
 ```cpp
-auto adults = profiles.query([](auto profile) {
-    return profile.age >= 18 && profile.email.endsWith(".test"); // endsWith は query operator ではありません
+auto adults = profiles.query([](const Profile& profile) {
+    return profile.age >= 18 && profile.name == "Alice";
 });
 ```
 
-ラムダ自体は通常の C++ なので、ローカル定数や helper 関数は使えます。境界になるのは戻り値です。戻り値は query API が理解できる expression type である必要があります。たとえば `startsWith()`、`contains()`、`like()` は対応済みの文字列 operator ですが、`endsWith()` は現時点の query DSL にはありません。
+生成される descriptor は bytecode、定数、field binding、plan hint、所有している capture を保持します。`PackedTable::query(descriptor)` は bytecode query view を作ります。参照フィールドがすべて raw reader を持つ場合はエンコード済みの行 byte 列を直接評価し、そうでない場合は entity を decode して同じ bytecode VM を実行します。
 
-任意のエンティティ predicate がクエリ式へ変換されるわけではありません。predicate は expression の形で書きます。helper 関数を使う場合も、その helper がプロキシフィールド上のクエリ式を返す必要があります。実体エンティティから runtime `bool` を計算する helper は、そのままではクエリ predicate になりません。
+`where()` も bytecode として合成できる場合は rewrite されます。
 
-## インデックス計画
+```cpp
+auto view = profiles.query([](const Profile& profile) {
+    return profile.age >= 18;
+});
 
-planner は、候補集合を狭められる登録済みインデックスを探します。返す前には常に完全な式で絞り込むため、インデックス計画は scan cost を変えるだけで、クエリの意味は変えません。
+auto bobby = view.where([](const Profile& profile) {
+    return profile.name == "Bobby";
+});
+```
+
+`profiles.query(...).where(...)` の直接 chain と、変数に入れた rewritten query view の `where(...)` の両方が対象です。対応できない `where` lambda は、通常の decode 後 filter として残ります。対応できない `query` lambda は、必要に応じて生成された `HostCallBool` descriptor に包まれます。
+
+## 実用上の目安
+
+通常の高レベル expression DSL では `[](auto row)` を使います。Clang plugin で native bytecode に rewrite したい場合は `[](const Entity& row)` を使います。
+
+index は table を開いた直後に登録します。完全一致、`IN`、否定 membership、数値範囲には `indexed<&Field>()` を追加します。頻繁な `startsWith()` や単純な `like("prefix%")` には `prefixIndexed<&Field>()` を追加します。
+
+map や nested field の条件は表現力のために使えますが、それだけで index の起点になるとは考えない方が安全です。必要なら top-level の indexed predicate と組み合わせます。
+
+## Advanced
+
+### Query lambda の境界
+
+通常の `query()` に渡す lambda は、実 entity ではなく query proxy を受け取ります。戻り値は proxy field と対応 operator から作られた query expression である必要があります。
+
+```cpp
+auto adults = profiles.query([](auto profile) {
+    return profile.age >= 18 && profile.email.endsWith(".test"); // query DSL operator ではない
+});
+```
+
+lambda 自体は普通の C++ なので、ローカル定数や helper function は使えます。境界になるのは戻り値です。helper を使う場合も、その helper は proxy field 上の query expression を返す必要があります。
+
+bytecode rewrite 経路では境界が少し違います。型付き entity lambda を受け取り、戻り値の C++ 式を lowering しようとします。builtin 比較、論理演算、算術、対応する文字列操作、capture、見えている static custom opcode registration は lowering できます。未対応の row-dependent code は、`query(...)` では host call fallback、`where(...)` では decode 後 filter として残ります。
+
+### インデックス計画
+
+planner は候補集合を狭められる登録済み index を探します。返す前には必ず完全な query expression を評価するため、index plan は scan cost を変えるだけで query semantics は変えません。
 
 | 条件 | 計画 |
 |---|---|
-| `field == literal` | 通常のフィールドインデックスの等価範囲。 |
-| 数値の `field >/>=/</<= literal` | `bool` 以外の算術フィールドでは、通常のフィールドインデックスの順序付き範囲。 |
-| `field.in(values)` | 変換できる値ごとの等価範囲。候補の主キーは重複除去されます。 |
-| `field != literal`、`notIn`、`isNotNull` | 通常のフィールドインデックス全体を scan し、式で絞り込みます。 |
-| `isNull` | 通常のフィールドインデックス上で、エンコードされた空 optional の等価範囲。 |
-| `startsWith("prefix")` | `prefixIndexed<&Field>()` があれば prefix index の範囲。なければ `indexed<&Field>()` の全体 scan に fallback。 |
-| `like("prefix%")` | 単純な末尾 `%` の prefix pattern で `prefixIndexed<&Field>()` があれば prefix index の範囲。なければ通常のフィールドインデックス全体 scan に fallback。 |
-| `like("exact")` | 通常のフィールドインデックスの等価範囲。 |
-| `contains` | 通常のフィールドインデックス全体を scan し、式で絞り込みます。 |
-| `AND` | 両辺を見て、使えるインデックス計画のうち score が高い側を選びます。 |
-| `OR` | 両辺ともインデックス計画を作れる場合、範囲を union して候補主キーを重複除去します。片側でも index 化できない場合は、取りこぼしを避けるため table scan に fallback します。 |
+| `field == literal` | 通常 field index の等価 range。 |
+| 数値 `field >/>=/</<= literal` | `bool` 以外の arithmetic field では通常 field index の ordered range。 |
+| `field.in(values)` | 変換できる値ごとに等価 range を作り、候補 primary key を dedupe。 |
+| `field != literal`, `notIn`, `isNotNull` | 通常 field index 全体を scan し、式で filter。 |
+| `isNull` | 通常 field index 上で encoded empty optional の等価 range。 |
+| `startsWith("prefix")` | `prefixIndexed<&Field>()` があれば prefix-index range。なければ `indexed<&Field>()` の full field-index scan。 |
+| `like("prefix%")` | 単純な末尾 `%` pattern かつ `prefixIndexed<&Field>()` があれば prefix-index range。なければ通常 field-index scan。 |
+| `like("exact")` | 通常 field index の等価 range。 |
+| `contains` | 通常 field index 全体を scan し、式で filter。 |
+| `AND` | 両側を見て、score が高い usable index plan を選びます。 |
+| `OR` | 両側が index plan を作れる場合は range union を scan して primary key を dedupe。片側でも index 化できない場合は table scan。 |
 
-## planner の優先順位
+`AND` の中に複数の usable index plan がある場合、planner は単純な score で scan source を選びます。
 
-`AND` 式の中に複数の index plan がある場合、planner は単純な score で scan の起点を選びます。相対的な優先順位は次の通りです。
-
-| 計画 | 相対 score |
+| 計画種別 | 相対 score |
 |---|---:|
-| 等価 | 100 |
-| 文字列 prefix index | 95 |
-| `IN` の等価範囲 | 90 |
-| optional `isNull` の等価範囲 | 85 |
-| 数値の順序付き範囲 | 80 |
+| Equality | 100 |
+| String prefix index | 95 |
+| `IN` equality ranges | 90 |
+| Optional `isNull` equality | 85 |
+| Ordered numeric range | 80 |
 | `OR` union | 70 |
-| フィールドインデックス全体 scan | 10 |
+| Full field-index scan | 10 |
 
-この score は scan 起点を選ぶための heuristic です。テーブルの件数や index の選択度を見た cost model ではありません。
+この score は heuristic です。table cardinality や index selectivity を見る cost model ではありません。
 
-## literal 変換
+### literal 変換
 
-index range は、literal をフィールド型へ変換できる場合だけ作られます。
+index range は literal を field type に変換できる場合だけ作られます。
 
 | ケース | 挙動 |
 |---|---|
-| `std::string` フィールドと string-like literal | `std::string_view` 経由で変換します。 |
-| 算術フィールドと算術 literal | 値がフィールド型の範囲に収まる場合だけ変換します。負数は unsigned field へ変換されません。 |
-| constructible / convertible なフィールド型 | 構築または代入変換を使います。 |
+| `std::string` field と string-like literal | `std::string_view` 経由で変換します。 |
+| arithmetic field と arithmetic literal | 値が field type に収まる場合だけ変換します。負数は unsigned field に変換されません。 |
+| constructible / convertible な field type | construction または assignment conversion を使います。 |
 | 変換できない literal | その predicate は index plan の起点になりません。 |
-| `IN` の値 | 変換できる値ごとに等価範囲を作り、変換できない値は skip します。 |
+| `IN` values | 変換できる値ごとに等価 range を作り、変換できない値は skip します。 |
 
-候補行を読み込んだ後には、完全なクエリ式が必ず評価されます。literal 変換は index range を作れるかどうかだけを決めます。
+候補行を読み込んだ後には、完全な query expression が必ず評価されます。literal conversion は index range を作れるかどうかだけを決めます。
 
-## LIKE の意味
+### LIKE の意味
 
-`like()` は SQL 風の wildcard match を行います。
+`like()` は SQL 風 wildcard matching を行います。
 
 | pattern token | 意味 |
 |---|---|
@@ -141,22 +179,26 @@ index range は、literal をフィールド型へ変換できる場合だけ作
 | `_` | ちょうど 1 文字に一致します。 |
 | その他の文字 | その文字自身に一致します。 |
 
-`%` や `_` を wildcard ではなく通常文字として扱うための escape syntax は、現時点ではドキュメント化された API としてありません。
+`%` や `_` を wildcard ではない通常文字として扱うための escape syntax は、現時点では documented API としてありません。
 
-prefix index を使えるのは、`like("abc%")` のような単純な末尾 `%` pattern だけです。`like("%abc")`、`like("a_c%")`、`like("a%b%")`、`like("abc_")` は正しく評価されますが、prefix-index range optimization の対象にはなりません。
+prefix index を使えるのは `like("abc%")` のような単純な末尾 `%` pattern だけです。`like("%abc")`、`like("a_c%")`、`like("a%b%")`、`like("abc_")` は正しく評価されますが、prefix-index range optimization の対象にはなりません。
 
-## 計画上の注意
+### bytecode runtime の詳細
 
-`AND` は片側のインデックスだけを使っても、読み込んだ候補行に残りの条件を適用すれば正しく評価できます。`OR` は片側だけを使うと未 index 側にだけ一致する行を取りこぼすため、両辺が indexable な場合だけ union plan になります。
+bytecode VM は field load、constant、比較、`!`、対応する string predicate、user custom opcode、host-call fallback、数値 `+`、`-`、`*`、`/`、`%`、`JumpIfFalse` / `JumpIfTrue` による short-circuit `&&` / `||` をサポートします。
 
-`OR` union plan は常に小さい scan になるとは限りません。`!=`、`notIn`、`isNotNull`、`contains` のような branch は、フィールドインデックス全体 scan を作ることがあります。union plan は正しく評価されますが、多くの index entry を読む場合があります。
+`BytecodeQueryView::where(descriptor)` は既存 descriptor と新しい descriptor を論理 `AND` で合成し、scan 用に 1 つの prepared bytecode program を作ります。合成 descriptor は host-call と custom-opcode の capture pointer を call / binding ごとに保持するため、独立した capture を持つ descriptor 同士も 1 本の descriptor-wide capture pointer を共有せずに合成できます。
 
-prefix index は通常のフィールドインデックスとは別のインデックスです。string-like field 専用で、`findBy<&Field>()` には使われず、等価検索や数値範囲用の通常インデックスを置き換えるものでもありません。対象文字列フィールドの書き込み、削除、主キー更新で追加のメンテナンスが発生しますが、prefix search 用のキーを小さく保ち、通常のフィールドインデックスのレイアウトを複雑にしません。
+user opcode id は `0x8000..0xFFFF` です。`CustomOpcodeRegistry::registerOpcode(...)` は不正または重複した metadata を拒否し、log を出し、registry を変更せずに処理を続けます。`AKKARADB_QUERY_OPCODE(...)` による static lowering は、その registration が translation unit 内で query より前に見えている場合に働きます。
 
-通常のインデックスも prefix index も、既存行へ自動 backfill されません。テーブルを開いた直後、対象行を書き込む前に登録します。
+bytecode は `Ref<T>` を local raw-row field として辿りません。`post.author->name == "Alice"` のような predicate は table boundary を跨ぎます。`query(...)` では plugin が通常の C++ lazy resolution を保つために `HostCallBool` descriptor を出し、`where(...)` では composable bytecode にできない限り decode 後 filter として残します。
 
-使えるインデックス計画がなければ、テーブル範囲を scan して各行に式を評価します。
+### planner のトレードオフ
 
-## 実用上の目安
+`AND` は片側の index だけを使っても、候補行に残りの predicate を適用すれば正しく評価できます。`OR` は片側だけを使うと unindexed branch に一致する行を取り逃がすため、両側が indexable な場合だけ union plan になります。
 
-インデックスはテーブルを開いた直後に登録します。完全一致、`IN`、否定 membership、数値範囲には `indexed<&Field>()` を追加します。頻繁な `startsWith()` や単純な `like("prefix%")` には、別途 `prefixIndexed<&Field>()` を追加します。map や nested field の条件は表現力のために使えますが、top-level の indexed predicate がない限り index 起点になるとは考えない方が安全です。
+`OR` union plan は常に小さいとは限りません。`!=`、`notIn`、`isNotNull`、`contains` のような branch は full field-index scan を作ることがあります。union plan は正しいですが、多くの index entry を読む場合があります。
+
+prefix index は通常 field index とは別の index です。string-like field 専用で、`findBy<&Field>()` には使われず、等価検索や数値範囲用の通常 index を置き換えるものでもありません。対象 string field の write / delete / update では追加 maintenance が発生します。
+
+通常 index も prefix index も、既存行へ自動 backfill されません。table を開いた直後、対象行を書き込む前に登録してください。

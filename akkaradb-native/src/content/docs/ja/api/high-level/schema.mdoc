@@ -1,9 +1,9 @@
 ---
 title: Schema と Foreign Key
-description: テーブル登録、参照の接続、フックによる外部キー動作。
+description: テーブル登録、Ref binding、hook ベースの foreign-key action。
 ---
 
-`AkkaraDB::Schema` は型付きテーブルをまとめ、参照に関する動作を設定します。専用の制約エンジンではなく、高レベル API の調整用ヘルパーです。
+`AkkaraDB::Schema` は型付きテーブルをまとめ、参照に関する動作を設定します。専用の制約エンジンではなく、高レベル API の調整用 helper です。
 
 ## テーブル登録
 
@@ -17,7 +17,7 @@ auto& authors = schema.table<Author>();
 auto& posts = schema.table<Post>();
 ```
 
-スキーマは C++ のエンティティ型ごとにテーブルホルダを保持します。また、登録済みテーブルの間で `Ref<T>` フィールドを解決するための接続情報も提供します。
+schema は C++ の entity type ごとに table holder を保持します。また、登録済みテーブル間で `Ref<T>` field を解決するための binding も提供します。
 
 ## Ref の外部キー
 
@@ -29,7 +29,7 @@ auto schema = db->schema()
     .open();
 ```
 
-`foreignKey<&Post::author>()` のフィールドは `akkaradb::Ref<T>` である必要があります。参照先テーブルも同じスキーマに登録されている必要があります。
+`foreignKey<&Post::author>()` の field は `akkaradb::Ref<T>` である必要があります。参照先テーブルも同じ schema に登録されている必要があります。
 
 ## 通常フィールドの外部キー
 
@@ -40,32 +40,34 @@ schema.foreignKey<&PlainPost::authorId, &Author::id>(
 );
 ```
 
-参照元フィールドと参照先フィールドは比較可能である必要があります。参照先フィールドに `Ref<T>` は使えません。参照先フィールドが参照先テーブルの主キーではない場合、存在確認のために参照先テーブル側へインデックスが登録されます。
+source field と target field は比較可能である必要があります。target field に `Ref<T>` は使えません。target field が参照先テーブルの primary key ではない場合、存在確認のために target table 側へ index が登録されます。
 
 ## 動作
 
-| 動作 | 削除時 | 主キー更新時 |
+| Action | delete 時 | primary-key update 時 |
 |---|---|---|
-| `Restrict` | 参照されている参照先の削除を拒否します。 | 参照されている参照先キーの移動を拒否します。 |
-| `Cascade` | 参照先を指している参照元行を削除します。 | 参照元フィールドを新しい参照先キーへ書き換えます。 |
-| `SetNull` | null 許容の参照元フィールドを `std::nullopt` にします。 | null 許容の参照元フィールドを `std::nullopt` にします。 |
+| `Restrict` | 参照されている target の削除を拒否します。 | 参照されている target key の移動を拒否します。 |
+| `Cascade` | target を参照している source rows を削除します。 | source fields を新しい target key へ書き換えます。 |
+| `SetNull` | nullable source fields を `std::nullopt` にします。 | nullable source fields を `std::nullopt` にします。 |
 
-削除時の動作と更新時の動作は、それぞれ 1 つずつ選びます。`SetNull` を使うフィールドには `std::optional<T>` が必要です。
+delete action と update action はそれぞれ 1 つだけ選べます。`SetNull` には `std::optional<T>` が必要です。
 
-## コストと境界
+## Advanced
 
-参照元の `put()` 時には、外部キー検証として参照先の存在を確認します。参照先が主キーでない場合は、参照先側のインデックスを使います。
+### コストと境界
 
-削除時と更新時の動作では、参照している行を探すために参照元テーブルをスキャンします。小規模な埋め込み用途では予測しやすい構成ですが、専用のインデックス付き制約エンジンの代替ではありません。
+source `put()` 時の foreign-key validation は target の存在を確認します。non-primary target field では target-side index を使えます。
 
-大きいテーブルで外部キー動作が重要な経路に入る場合は、参照元側のインデックスや、アプリケーション側の検索用テーブルを用意します。
+delete / update action は、参照している行を見つけるために source table を scan します。これは単純で予測しやすい挙動ですが、native indexed constraint engine の代替ではありません。
 
-## 失敗しやすいケース
+大きなテーブルで foreign-key action が hot path に入る場合は、明示的な source-side index や application-level lookup table を用意してください。
+
+### 失敗しやすいケース
 
 | 症状 | 主な原因 |
 |---|---|
-| 参照先テーブルが見つからない | 参照先のエンティティがスキーマに追加されていません。 |
-| `SetNull` が例外になる | 参照元フィールドが `std::optional<T>` ではありません。 |
-| 削除が拒否される | 参照元行がまだ参照先を指しています。 |
-| 更新が拒否される | 参照元行がまだ古い参照先キーを指しています。 |
-| 参照元の保存時に参照先が見つからない | 参照元行が存在しない参照先を指しています。 |
+| target table が登録されていない | 参照先 entity が schema に追加されていません。 |
+| `SetNull` が失敗する | source field が `std::optional<T>` ではありません。 |
+| delete が restrict される | source rows がまだ target を参照しています。 |
+| update が restrict される | source rows がまだ古い target key を参照しています。 |
+| source put 時に target が見つからない | source row が存在しない target を指しています。 |

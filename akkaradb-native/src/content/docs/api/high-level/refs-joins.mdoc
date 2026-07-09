@@ -1,6 +1,6 @@
 ---
 title: Ref And Join
-description: Row-id references, lazy resolution, dirty ref flushes, and typed join views.
+description: Row-id references, lazy resolution, dirty ref flushes, typed join views, and query bytecode boundaries.
 ---
 
 `Ref<T>` is the high-level reference type. It stores enough information to resolve another entity by stable row id or primary key, and it can lazily load the referenced value through a table binding.
@@ -33,34 +33,12 @@ authors.put({1, "Alice"});
 posts.put({100, akkaradb::ref<Author>(1), "Hello"});
 ```
 
-When the table or schema has a binding for `Author`, the ref can resolve lazily:
+When the table or schema has a binding for `Author`, the ref can resolve lazily.
 
 ```cpp
 auto post = posts.get(100);
 auto name = post->author->name;
 ```
-
-## Ref States
-
-| State | Meaning |
-|---|---|
-| key known | `id()` can return without row-id lookup. |
-| row id known | `rowId()` can return or resolve through metadata. |
-| loaded | `operator->` and `operator*` can access the value. |
-| dirty | The referenced value should be written before the owner is stored. |
-| attached | A table binding is available for lazy resolution. |
-
-Creating a `Ref<T>` from a full entity marks it dirty. `PackedTable::put()` flushes dirty refs before writing the owning entity.
-
-## Primary-Key Changes
-
-Refs are stable across primary-key changes because the table maintains `pk2row` and `row2pk` metadata.
-
-```cpp
-authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
-```
-
-An existing `Ref<Author>` can still resolve through the row id after the visible primary key changes.
 
 ## Joins
 
@@ -75,13 +53,45 @@ auto rows = posts
     .toVector();
 ```
 
-Plain-field joins specify both sides:
+Plain-field joins specify both sides.
 
 ```cpp
 auto rows = posts.join<&PlainPost::authorId, &Author::id>(authors).toVector();
 ```
 
-## Execution Shape
+Each join row contains the left `Entry` and the decoded right entity. `where()`, `first()`, `any()`, `count()`, and `toVector()` are evaluated in the join view.
+
+## Practical Rules
+
+Use `Ref<T>` when the owner row should keep following the same logical target across primary-key changes. Use a plain foreign-key field when you only need to store and compare a visible key.
+
+Use `join<&RefField>(right)` for ref fields and `join<&LeftField, &RightField>(right)` for plain fields. For large relation-heavy workloads, model hot lookup paths with explicit indexes or application-level materialized views.
+
+## Advanced
+
+### Ref States
+
+| State | Meaning |
+|---|---|
+| key known | `id()` can return without row-id lookup. |
+| row id known | `rowId()` can return or resolve through metadata. |
+| loaded | `operator->` and `operator*` can access the value. |
+| dirty | The referenced value should be written before the owner is stored. |
+| attached | A table binding is available for lazy resolution. |
+
+Creating a `Ref<T>` from a full entity marks it dirty. `PackedTable::put()` flushes dirty refs before writing the owning entity.
+
+### Primary-Key Changes
+
+Refs are stable across primary-key changes because the table maintains `pk2row` and `row2pk` metadata.
+
+```cpp
+authors.updatePrimaryKey(1, Author{10, "Alice Cooper"});
+```
+
+An existing `Ref<Author>` can still resolve through the row id after the visible primary key changes.
+
+### Join Execution Shape
 
 | Join form | Cost shape |
 |---|---|
@@ -89,4 +99,12 @@ auto rows = posts.join<&PlainPost::authorId, &Author::id>(authors).toVector();
 | `join<&LeftField, &RightPk>(right)` | Left scan plus right primary-key lookup. |
 | `join<&LeftField, &RightField>(right)` | Left scan plus right scan for matching fields. |
 
-Join helpers do not install a native join plan. For large relation-heavy workloads, model lookup paths with explicit indexes or application-level materialized views.
+Join helpers do not install a native join engine plan. They are view-level helpers over table scans and lookups.
+
+### Query And Bytecode Boundaries
+
+Lazy `Ref<T>` resolution is normal C++ behavior. A predicate such as `post.author->name == "Alice"` crosses from one table into another and cannot be represented as a local raw-row field load.
+
+In the Clang plugin bytecode rewrite path, `PackedTable::query(lambda)` with a `Ref<T>` crossing is emitted as an owned `HostCallBool` descriptor. That preserves normal lazy resolution, but it disables raw row evaluation for that predicate.
+
+`BytecodeQueryView::where(lambda)` leaves `Ref<T>` crossings as decoded predicate filters because `where` descriptors must be bytecode-composable. Explicit `join(...).where([](const Left&, const Right&) { ... })` keeps the existing two-entity predicate semantics and is not rewritten into local row bytecode.

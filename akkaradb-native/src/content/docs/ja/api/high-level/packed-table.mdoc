@@ -1,9 +1,9 @@
 ---
 title: PackedTable
-description: 型付き CRUD、スキャン、インデックス、行 ID、更新フック、変更不可フィールドの操作。
+description: 型付き CRUD、スキャン、インデックス、row id、更新フック、変更不可フィールドの操作。
 ---
 
-`PackedTable<&T::id>` は高レベル API の中心です。C++ aggregate を主キーごとに 1 つのエンコード済み値として保存し、行 ID mapping やセカンダリインデックスなどのテーブルメタデータを管理します。
+`PackedTable<&T::id>` は高レベル API の中心になる型付きテーブル API です。C++ aggregate を primary key ごとに 1 つのエンコード済み値として保存し、row-id mapping や secondary index などのテーブル metadata も管理します。
 
 ## テーブルを定義する
 
@@ -19,34 +19,24 @@ AKKARADB_ENTITY(User, id, name, age);
 auto users = db->table<&User::id>("users");
 ```
 
-`AKKARADB_ENTITY` は `RefTraits<User>` とクエリ用フィールドの両方を登録します。クエリだけ必要で `Ref<T>` の対応が不要なら `AKKARADB_QUERYABLE` を使います。
+`AKKARADB_ENTITY` は `RefTraits<User>` と query field の両方を登録します。query だけが必要で `Ref<T>` 対応が不要な型では `AKKARADB_QUERYABLE` を使います。
 
 ## 主要メソッド
 
-| Method | 挙動 |
+| メソッド | 挙動 |
 |---|---|
-| `put(entity)` | エンティティの主キーで挿入または置換します。 |
+| `put(entity)` | エンティティの primary key で insert または replace します。 |
 | `get(pk)` | `std::optional<Entity>` を返します。 |
-| `getInto(pk, out)` | 呼び出し側が渡したオブジェクトに decode します。 |
-| `exists(pk)` | 現在の行の存在を確認します。 |
-| `remove(pk)` | 行、行 ID メタデータ、インデックスエントリを削除します。 |
-| `upsert(pk, fn)` | 読み込みまたはデフォルト構築し、主キーを設定してコールバック後に書き込みます。 |
-| `updatePrimaryKey(oldPk, entity)` | 行 ID を保ったまま新しい主キーへ移動します。 |
-| `count()` | テーブル名前空間内の行数を数えます。 |
-
-## 主キーの更新
-
-`put()` は同じ主キーの値を置き換える API です。識別子自体を移動する場合は `updatePrimaryKey()` を使います。
-
-```cpp
-users.updatePrimaryKey(1, User{10, "Alice Cooper", 31});
-```
-
-移動先の主キーは存在してはいけません。安定した行 ID は維持されるため、`Ref<T>` は引き続き解決できます。
+| `getInto(pk, out)` | 呼び出し側が持つ storage へ decode します。 |
+| `exists(pk)` | 現在行の存在を確認します。 |
+| `remove(pk)` | 行、row-id metadata、index entries を削除します。 |
+| `upsert(pk, fn)` | 読み込み、または default construct した上で primary key を設定し、callback 後に書き込みます。 |
+| `updatePrimaryKey(oldPk, entity)` | row id を保ったまま新しい primary key へ移動します。 |
+| `count()` | table namespace 内の行数を数えます。 |
 
 ## スキャン
 
-`scanAll()` はテーブル名前空間全体をスキャンします。`scan(startPk, endPk)` は半開区間の主キー範囲をスキャンします。
+`scanAll()` は table namespace 全体を scan します。`scan(startPk, endPk)` は half-open な primary-key range を scan します。
 
 ```cpp
 auto rows = users.scan(100ULL, 200ULL);
@@ -55,7 +45,7 @@ while (rows.hasNext()) {
 }
 ```
 
-返る `Entry` には `id` と `value` が入ります。数値の主キーはソート可能なバイト順でエンコードされるため、範囲スキャンは自然な数値順になります。
+返る `Entry` には `id` と `value` が含まれます。
 
 ## インデックス
 
@@ -66,13 +56,31 @@ auto byEmail = users.index<&User::email>();
 auto alice = byEmail.find("alice@example.test");
 ```
 
-`indexed<&Field>()` は通常のフィールドインデックスを連結して登録するヘルパーです。`prefixIndexed<&Field>()` は、`startsWith()` や単純な prefix `like()` のクエリ計画に使う、別の文字列 prefix index を登録します。prefix index は string-like field 専用で、`findBy<&Field>()` には使われません。`findBy<&Field>(value)` は最初に見つかったエンティティを返し、通常のフィールドインデックスが未登録なら例外を投げます。
+`indexed<&Field>()` は通常の field index を chain して登録する helper です。`prefixIndexed<&Field>()` は `startsWith()` と単純な prefix `like()` の query planning に使う、別の string prefix index を登録します。
 
-インデックス項目は挿入、置換、削除、主キー更新で更新されます。既存行は自動的には反映されません。
+## Advanced
 
-## 更新フック
+### 主キーの更新
 
-`onUpdate<&Field>()` は、既存行の置き換えで対象フィールドが変わったときに実行されます。
+`put()` は同じ primary key の値を置き換える API です。identity 自体を移動する場合は `updatePrimaryKey()` を使います。
+
+```cpp
+users.updatePrimaryKey(1, User{10, "Alice Cooper", 31});
+```
+
+移動先 primary key は存在してはいけません。安定した row id は保たれるため、`Ref<T>` は引き続き解決できます。
+
+数値 primary key は順序を保つ byte order でエンコードされるため、range scan は自然な数値順になります。
+
+### インデックスの管理
+
+prefix index は string-like field 専用で、`findBy<&Field>()` には使われません。`findBy<&Field>(value)` は最初に見つかったエンティティを返し、通常の field index が未登録なら例外を投げます。
+
+index entries は insert、replacement、remove、primary-key update で更新されます。既存行には自動 backfill されません。
+
+### 更新フック
+
+`onUpdate<&Field>()` は既存行が置き換えられ、そのフィールドが変化したときに実行されます。
 
 ```cpp
 users.onUpdate<&User::age>(
@@ -82,9 +90,9 @@ users.onUpdate<&User::age>(
 );
 ```
 
-フックは置き換え後のエンティティがエンコードされる前に走ります。テーブルの書き込み経路の中で実行されるため、決定的で局所的な処理に留めるのが扱いやすいです。
+hook は replacement entity がエンコードされる前に走ります。table write path の中で実行されるため、決定的で局所的な処理に留めるのが安全です。
 
-## 変更不可フィールド
+### 変更不可フィールド
 
 `Immutable<T>` は、読み込み後または保存後に変更したくないフィールドを守ります。
 
@@ -95,4 +103,4 @@ struct Account {
 };
 ```
 
-seal 済みの immutable field を置き換え時に変更すると、例外を投げます。主キーフィールドには `Immutable<T>` を使えません。
+sealed immutable field を replacement 時に変更しようとすると例外を投げます。primary-key field には `Immutable<T>` を使えません。

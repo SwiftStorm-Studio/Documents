@@ -1,9 +1,13 @@
 ---
 title: Query
-description: C++ typed query expressions, QueryView methods, and index planning behavior.
+description: C++ typed query expressions, bytecode rewrite support, QueryView methods, and index planning behavior.
 ---
 
-The high-level query API builds expression types through overloaded C++ operators. It does not interpret runtime lambdas and does not require a compiler plugin.
+The high-level query API has two execution paths.
+
+The normal C++ API builds typed expression objects through overloaded operators and field proxy objects. This path uses lambdas such as `[](auto row) { ... }` and does not require a compiler plugin.
+
+Native builds may also run the optional `akkara-query` Clang plugin. In that path, supported typed lambdas such as `[](const Profile& row) { ... }` are rewritten at compile time into bytecode descriptors that can run directly over row bytes when possible.
 
 ## Setup
 
@@ -40,7 +44,7 @@ auto adults = profiles
     .toVector();
 ```
 
-`query()` returns a `QueryView`. It is lazy until you iterate it or call a terminal method.
+`query()` returns a lazy view. It is evaluated when you iterate it or call a terminal method.
 
 | Method | Result |
 |---|---|
@@ -51,7 +55,7 @@ auto adults = profiles
 | `count()` | Counts matched rows. |
 | `toVector()` | Materializes matched entries. |
 
-Query result order is not a stable API contract. Table scans, index scans, multi-range `IN`, and `OR` union plans may expose different engine scan orders. Sort the materialized result in application code when order matters.
+Query result order is not a stable API contract. Sort materialized results in application code when order matters.
 
 ## Supported Expressions
 
@@ -69,21 +73,57 @@ Query result order is not a stable API contract. Table scans, index scans, multi
 
 Nested fields require `template field<...>()` because the proxy expression is a dependent template call.
 
-## Query Lambda Boundary
+## Native Bytecode Rewrite
 
-The lambda passed to `query()` is called with a query proxy, not a real entity. It must return a query expression built from proxy fields and supported operators.
+With the `akkara-query` Clang plugin, typed entity lambdas can be rewritten to `akkaradb::query::bytecode::CompiledQueryDescriptor<T>`.
 
 ```cpp
-auto adults = profiles.query([](auto profile) {
-    return profile.age >= 18 && profile.email.endsWith(".test"); // endsWith is not a query operator
+auto adults = profiles.query([](const Profile& profile) {
+    return profile.age >= 18 && profile.name == "Alice";
 });
 ```
 
-The lambda itself is ordinary C++ and can use local constants or helper functions. The boundary is the return value: it must be an expression type that the query API understands. For example, `startsWith()`, `contains()`, and `like()` are supported string operators, but `endsWith()` is not currently part of the query DSL.
+The generated descriptor stores bytecode, constants, field bindings, plan hints, and any owned captures. `PackedTable::query(descriptor)` creates a bytecode query view. When all referenced fields have raw readers, the view can evaluate the predicate directly against encoded row bytes; otherwise it decodes the entity and runs the same bytecode VM.
 
-Arbitrary entity predicates are not converted into query expressions. Keep predicates in expression form. Helper functions are fine only when they return query expressions over proxy fields; helpers that compute a runtime `bool` from a real entity are not query predicates.
+`where()` can also be rewritten when it is bytecode-composable:
 
-## Index Planning
+```cpp
+auto view = profiles.query([](const Profile& profile) {
+    return profile.age >= 18;
+});
+
+auto bobby = view.where([](const Profile& profile) {
+    return profile.name == "Bobby";
+});
+```
+
+Direct chains such as `profiles.query(...).where(...)` and variables that hold a rewritten query view are both supported. Unsupported `where` lambdas are left as normal decoded predicate filters. Unsupported `query` lambdas may still be wrapped as a generated `HostCallBool` descriptor.
+
+## Practical Rules
+
+Use `[](auto row)` for the normal high-level expression DSL. Use `[](const Entity& row)` when the Clang plugin should rewrite the lambda into native bytecode.
+
+Register indexes immediately after opening a table. Add `indexed<&Field>()` for exact lookup, `IN`, negative membership, and numeric range predicates. Add `prefixIndexed<&Field>()` separately for hot `startsWith()` or simple `like("prefix%")` predicates.
+
+Keep map and nested-field predicates for expressiveness, but do not assume they are index-seeded unless a top-level indexed predicate is also present.
+
+## Advanced
+
+### Query Lambda Boundary
+
+The normal lambda passed to `query()` is called with a query proxy, not a real entity. It must return a query expression built from proxy fields and supported operators.
+
+```cpp
+auto adults = profiles.query([](auto profile) {
+    return profile.age >= 18 && profile.email.endsWith(".test"); // not a query DSL operator
+});
+```
+
+The lambda itself is ordinary C++ and can use local constants or helper functions. The boundary is the return value: it must be an expression type that the query API understands. Helpers are fine only when they return query expressions over proxy fields.
+
+The bytecode rewrite path has a different boundary. It receives a typed entity lambda and attempts to lower the returned C++ expression. Builtin comparisons, logical operators, arithmetic, supported string operations, captures, and visible static custom opcode registrations can be lowered. Unsupported row-dependent code falls back to a host call for `query(...)` and stays decoded for `where(...)`.
+
+### Index Planning
 
 The planner looks for registered indexes that can reduce the candidate set. The full expression is still evaluated before a row is returned, so an index plan changes scan cost, not query semantics.
 
@@ -101,9 +141,7 @@ The planner looks for registered indexes that can reduce the candidate set. The 
 | `AND` | The planner evaluates both sides and chooses the higher-scoring usable index plan. |
 | `OR` | If both sides can produce index plans, the planner scans the union of their ranges and deduplicates candidate primary keys. If either side cannot be indexed, the query falls back to table scan. |
 
-## Planner Priority
-
-When an `AND` expression contains multiple usable index plans, the planner uses a simple score to pick the candidate source. The relative priority is:
+When an `AND` expression contains multiple usable index plans, the planner uses a simple score to pick the candidate source.
 
 | Plan kind | Relative score |
 |---|---:|
@@ -115,9 +153,9 @@ When an `AND` expression contains multiple usable index plans, the planner uses 
 | `OR` union | 70 |
 | Full field-index scan | 10 |
 
-These scores are only a heuristic for choosing the scan source. They are not a cost model based on table cardinality or index selectivity.
+These scores are heuristics, not a cost model based on table cardinality or index selectivity.
 
-## Literal Conversion
+### Literal Conversion
 
 Index ranges are built only when the literal can be converted to the field type.
 
@@ -131,9 +169,9 @@ Index ranges are built only when the literal can be converted to the field type.
 
 The full query expression is still evaluated after loading candidates. Literal conversion only decides whether an index range can be produced.
 
-## LIKE Semantics
+### LIKE Semantics
 
-`like()` supports SQL-style wildcard matching:
+`like()` supports SQL-style wildcard matching.
 
 | Pattern token | Meaning |
 |---|---|
@@ -145,18 +183,22 @@ There is no documented escape syntax for treating `%` or `_` as literal wildcard
 
 Only a simple trailing-percent pattern such as `like("abc%")` can use a prefix index. Patterns such as `like("%abc")`, `like("a_c%")`, `like("a%b%")`, or `like("abc_")` are still evaluated correctly, but they cannot use the prefix-index range optimization.
 
-## Planner Tradeoffs
+### Bytecode Runtime Details
+
+The bytecode VM supports field loads, constants, comparisons, `!`, supported string predicates, user custom opcodes, host-call fallback, numeric `+`, `-`, `*`, `/`, `%`, and short-circuit `&&` / `||` through `JumpIfFalse` / `JumpIfTrue`.
+
+`BytecodeQueryView::where(descriptor)` composes the existing descriptor and the new descriptor with logical `AND`, producing one prepared bytecode program for the scan. Composed descriptors keep host-call and custom-opcode capture pointers per call or binding, so two independently captured descriptors can be combined without sharing one descriptor-wide capture pointer.
+
+User opcode ids are in `0x8000..0xFFFF`. `CustomOpcodeRegistry::registerOpcode(...)` rejects invalid or duplicate metadata, logs the rejection, and leaves the registry unchanged. Static lowering through `AKKARADB_QUERY_OPCODE(...)` works when the registration is visible earlier in the translation unit.
+
+Bytecode does not traverse `Ref<T>` as a local raw-row field. A predicate such as `post.author->name == "Alice"` crosses a table boundary. In `query(...)`, the plugin keeps normal C++ lazy resolution by emitting a `HostCallBool` descriptor. In `where(...)`, the predicate stays as a decoded filter unless it can be emitted as composable bytecode.
+
+### Planner Tradeoffs
 
 `AND` can safely use one indexed side because the remaining predicate is applied after loading each candidate row. `OR` needs both sides to be indexable; using only one side would miss rows that match the unindexed branch.
 
 An `OR` union plan is not always small. Branches such as `!=`, `notIn`, `isNotNull`, and `contains` may produce full field-index scans. The union plan remains correct, but it can still scan many index entries.
 
-Prefix indexes are separate from normal field indexes. They are string-like-field only, do not serve `findBy<&Field>()`, and do not replace normal field indexes for equality or numeric range planning. They add extra write/delete/update maintenance for the indexed string field, but keep prefix search keys compact and avoid overloading the normal field-index layout.
+Prefix indexes are separate from normal field indexes. They are string-like-field only, do not serve `findBy<&Field>()`, and do not replace normal field indexes for equality or numeric range planning. They add extra write/delete/update maintenance for the indexed string field.
 
 Indexes and prefix indexes are not backfilled over existing rows. Register them immediately after opening a table and before writing rows that should be visible through those indexes.
-
-If no usable index plan is available, the query scans the table range and evaluates the expression for each row.
-
-## Practical Rules
-
-Register indexes immediately after opening a table. Add `indexed<&Field>()` for exact lookup, `IN`, negative membership, and numeric range predicates. Add `prefixIndexed<&Field>()` separately for hot `startsWith()` or simple `like("prefix%")` predicates. Keep map and nested-field predicates for expressiveness, but do not assume they are index-seeded unless a top-level indexed predicate is also present.
