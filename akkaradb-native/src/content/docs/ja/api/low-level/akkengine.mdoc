@@ -1,19 +1,19 @@
 ---
 title: AkkEngine
-description: Native の byte 指向 storage engine API の概要。
+description: Native のバイト指向ストレージエンジン API の概要。
 ---
 
-`akkaradb::engine::AkkEngine` は、byte 指向の key/value engine を直接扱う API です。key と value は `std::span<const uint8_t>` として渡され、schema、table layout、value encoding、key naming は呼び出し側が所有します。
+`akkaradb::engine::AkkEngine` は、バイト指向のキー/値エンジンを直接扱う API です。キーと値は `std::span<const uint8_t>` として渡され、スキーマ、テーブルレイアウト、値のエンコード、キーの命名は呼び出し側が管理します。
 
-バイナリのキーレイアウト、durability options、scan、VersionLog behavior、Blob storage、storage-engine internals を直接制御したい場合に使います。
+バイナリのキーレイアウト、耐久性オプション、走査、VersionLog の挙動、Blob ストレージ、ストレージエンジン内部を直接制御したい場合に使います。
 
 ## ページ
 
 | ページ | 内容 |
 |---|---|
-| [使い方](/akkaradb-native/ja/api/low-level/akkengine/usage/) | engine の open、byte read/write、range scan、history、blob、stats、安全な close。 |
-| [アーキテクチャ](/akkaradb-native/ja/api/low-level/akkengine/architecture/) | write path、read path、storage components、lifetime、durability boundary。 |
+| [使い方](/akkaradb-native/ja/api/low-level/akkengine/usage/) | エンジンの open、バイトの読み書き、範囲走査、履歴、Blob、統計情報、安全な close。 |
+| [アーキテクチャ](/akkaradb-native/ja/api/low-level/akkengine/architecture/) | 書き込み経路、読み取り経路、ストレージ構成要素、寿命、耐久性の境界。 |
 | [設定オプション](/akkaradb-native/ja/api/low-level/options/) | `AkkEngineOptions` の全体像。 |
-| [統計情報](/akkaradb-native/ja/api/low-level/stats/) | runtime counters と読み取り方。 |
+| [統計情報](/akkaradb-native/ja/api/low-level/stats/) | 実行時カウンターと読み取り方。 |
 
 C++ struct を typed に保存したい場合は、高レベルの `AkkaraDB` / `PackedTable` API が向いています。

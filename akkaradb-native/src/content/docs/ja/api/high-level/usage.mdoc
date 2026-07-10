@@ -47,7 +47,7 @@ int main() {
 
 正確な低レベルオプションへの展開はエンジン層の責務です。明示的に制御したい場合は `AkkaraDB::Options::overrides` を使います。
 
-`AkkaraDB::Options::overrides` では、シャードごとの MemTable しきい値、VersionLog、SST codec、Blob codec、Blob しきい値、SST read promotion、Bloom filter のキーあたりビット数、L0 SST ファイル数の上限を上書きできます。`Options::api` は API サーバーの backend、port、transport、TLS / PSK、HTTP、TCP、gRPC の制限値を下層のエンジンオプションに渡します。
+`AkkaraDB::Options::overrides` では、シャードごとの MemTable しきい値、VersionLog、SST コーデック、Blob コーデック、Blob しきい値、SST 読み取り昇格、Bloom filter のキーあたりビット数、L0 SST ファイル数の上限を上書きできます。`Options::api` は API サーバーのバックエンド、ポート、通信方式、TLS / PSK、HTTP、TCP、gRPC の制限値を下層のエンジンオプションに渡します。
 
 ## エンティティを定義する
 
@@ -241,12 +241,12 @@ auto result = profiles
 | `like("exact")` | 等価範囲。 |
 | `like("prefix%")` | 単純な prefix pattern で `prefixIndexed<&Field>()` があれば prefix index の範囲。なければ通常のフィールドインデックス全体を scan し、式で絞り込みます。 |
 | `&&` の中の述語 | 計画器が使えるインデックス側を score で選びます。 |
-| `||` の中の述語 | 両辺とも index 化できる場合、複数の index 範囲を union し、候補主キーを重複除去します。片側でも index 化できない場合は table scan に fallback します。 |
+| `||` の中の述語 | 両辺ともインデックス化できる場合、複数のインデックス範囲を結合し、候補主キーを重複除去します。片側でもインデックス化できない場合はテーブル走査へフォールバックします。 |
 | ネストしたフィールド、map からの値取得 | 正しく評価されますが、それ単体では現在 index 起点にはなりません。 |
 
-planner の優先順位、literal 変換、`like()` の wildcard、クエリ lambda の境界は [Query](/akkaradb-native/ja/api/high-level/query/) を参照します。
+プランナーの優先順位、リテラル変換、`like()` のワイルドカード、クエリラムダ式の境界は [Query](/akkaradb-native/ja/api/high-level/query/) を参照します。
 
-## optional / nested / map field
+## optional / nested / map フィールド
 
 クエリプロキシは optional field、nested struct field、map lookup を扱えます。
 
@@ -380,7 +380,7 @@ schema.foreignKey<&PlainPost::authorId, &Author::id>(
 
 Native 高レベル API の型付きデータは、低レベル API と同じエンジンのキー空間に保存されます。下層エンジンで VersionLog が有効なら、型付き行も最終的にはエンジンのキー / 値書き込みなので、同じバージョン履歴の対象になります。
 
-この C++ 高レベルヘッダが現在公開しているのは、current-row CRUD、行 ID 検索、スキャン、クエリ、インデックス、参照、結合、スキーマ動作です。`PackedTable` には型付きの `getAt()` や `history()` ヘルパーは見えていないため、明示的な historical read や rollback control が必要な場合は `db->engine()` から低レベルの VersionLog API を使います。
+この C++ 高レベルヘッダが現在公開しているのは、現在行の CRUD、行 ID 検索、走査、クエリ、インデックス、参照、結合、スキーマ動作です。`PackedTable` には型付きの `getAt()` や `history()` ヘルパーは見えていないため、明示的な過去時点読み取りやロールバック制御が必要な場合は `db->engine()` から低レベルの VersionLog API を使います。
 
 ## よくある失敗
 

@@ -1,0 +1,110 @@
+---
+title: はじめに
+description: AkkaraDB Native をビルドし、耐久性を持つ型付き C++ テーブルを数分で作成します。
+---
+
+最初は高レベルの `AkkaraDB` / `PackedTable` API を選んでください。通常の C++ struct を BinPack で保存し、主キー、scan、index を独自の byte レイアウトなしで扱えます。
+
+独自の key レイアウトや byte エンコードをアプリケーション側で管理する場合だけ、低レベルの `AkkEngine` API を選びます。
+
+## 1. Native ライブラリをビルドする
+
+AkkaraDB Native は LLVM Clang を必要とします。Windows では Visual Studio developer environment 内の `clang-cl`、Linux/macOS では `clang++` を使います。
+
+```bash
+cmake --preset release
+cmake --build --preset release
+```
+
+Windows では最初に Visual Studio environment を初期化します。
+
+```powershell
+cmd /c "call \"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" >nul && cmake --preset windows-clang-cl-release && cmake --build --preset windows-clang-cl-release"
+```
+
+インストール済みパッケージを使う場合は、アプリケーションの CMake から Native target を link します。
+
+```cmake
+find_package(AkkaraDB REQUIRED)
+target_link_libraries(my_app PRIVATE AkkaraDB::akkaradb)
+```
+
+## 2. 行を定義してデータベースを開く
+
+保存し、型付き query helper から使う field を macro で登録します。型名の次の引数が主キーです。
+
+```cpp
+#include "akkaradb/AkkaraDB.hpp"
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+struct User {
+    uint64_t id;
+    std::string email;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(User, id, email, name, age)
+
+int main() {
+    auto db = akkaradb::AkkaraDB::open("data/app", akkaradb::StartupMode::NORMAL);
+    auto users = db->table<&User::id>("users");
+```
+
+`NORMAL` は組み込み用途の標準 profile です。同期 WAL と VersionLog が必要なら `DURABLE`、低オーバーヘッドなローカル用途なら `FAST` を選びます。profile の詳細は [AkkaraDB](/akkaradb-native/ja/api/high-level/akkaradb/) を参照してください。
+
+## 3. 書き込み、読み取り、走査
+
+`put()` は主キーにより行を insert または置換します。`get()` は `std::optional<T>` を返すため、存在しない場合を明示的に扱います。
+
+```cpp
+    users.put(User{1, "alice@example.test", "Alice", 30});
+
+    if (const auto alice = users.get(1)) {
+        std::cout << alice->name << " is " << alice->age << "\n";
+    }
+
+    auto rows = users.scanAll();
+    while (rows.hasNext()) {
+        const auto row = rows.next();
+        std::cout << row.value.email << "\n";
+    }
+```
+
+table 名と entity の field 順序は、保存済みデータの互換性に含まれます。table 名の変更や field の並べ替え・型変更は、migration として扱ってください。
+
+## 4. インデックスを使う前に登録する
+
+index は table を開いた直後、index 経由で見つけたい行を書き込む前に登録します。登録後の書き込みでは維持されますが、既存行は自動 backfill されません。
+
+```cpp
+    users.indexed<&User::email>()
+         .indexed<&User::age>();
+
+    users.put(User{2, "bob@example.test", "Bob", 24});
+
+    if (const auto bob = users.findBy<&User::email>("bob@example.test")) {
+        std::cout << bob->name << "\n";
+    }
+```
+
+文字列 prefix query を頻繁に行う場合は、`prefixIndexed<&Field>()` を別に使います。これは equality lookup 用の通常 index を置き換えません。
+
+## 5. 明示的に閉じる
+
+最後の table 操作後に close すると、process 終了前に設定済みの flush / sync policy が実行されます。
+
+```cpp
+    db->close();
+}
+```
+
+## 次に読むもの
+
+- 更新、query、参照、join、schema hook は [高レベル API の使い方](/akkaradb-native/ja/api/high-level/usage/)。
+- 型付き expression と index 計画は [Query](/akkaradb-native/ja/api/high-level/query/)。
+- byte 指向の保存制御が必要な場合は [低レベル API](/akkaradb-native/ja/api/low-level/)。
+- 別 process から HTTP、TCP、gRPC で使う場合は [API サーバー](/akkaradb-native/ja/api/low-level/api-server/)。

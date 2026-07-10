@@ -25,13 +25,13 @@ auto users = db->table<&User::id>("users");
 
 | メソッド | 挙動 |
 |---|---|
-| `put(entity)` | エンティティの primary key で insert または replace します。 |
+| `put(entity)` | エンティティの主キーで挿入または置換します。 |
 | `get(pk)` | `std::optional<Entity>` を返します。 |
-| `getInto(pk, out)` | 呼び出し側が持つ storage へ decode します。 |
+| `getInto(pk, out)` | 呼び出し側が持つ格納先へ復号します。 |
 | `exists(pk)` | 現在行の存在を確認します。 |
 | `remove(pk)` | 行、row-id metadata、index entries を削除します。 |
 | `upsert(pk, fn)` | 読み込み、または default construct した上で primary key を設定し、callback 後に書き込みます。 |
-| `updatePrimaryKey(oldPk, entity)` | row id を保ったまま新しい primary key へ移動します。 |
+| `updatePrimaryKey(oldPk, entity)` | 行 ID を保ったまま新しい主キーへ移動します。 |
 | `count()` | table namespace 内の行数を数えます。 |
 
 ## スキャン
@@ -56,9 +56,9 @@ auto byEmail = users.index<&User::email>();
 auto alice = byEmail.find("alice@example.test");
 ```
 
-`indexed<&Field>()` は通常の field index を chain して登録する helper です。`prefixIndexed<&Field>()` は `startsWith()` と単純な prefix `like()` の query planning に使う、別の string prefix index を登録します。
+`indexed<&Field>()` は通常のフィールドインデックスを連結して登録するヘルパーです。`prefixIndexed<&Field>()` は `startsWith()` と単純な接頭辞 `like()` のクエリ計画に使う、別の文字列接頭辞インデックスを登録します。
 
-## Advanced
+## 詳細
 
 ### 主キーの更新
 
@@ -90,7 +90,7 @@ users.onUpdate<&User::age>(
 );
 ```
 
-hook は replacement entity がエンコードされる前に走ります。table write path の中で実行されるため、決定的で局所的な処理に留めるのが安全です。
+フックは置換後のエンティティがエンコードされる前に動きます。テーブルの書き込み経路で実行されるため、決定的で局所的な処理に留めるのが安全です。
 
 ### 変更不可フィールド
 

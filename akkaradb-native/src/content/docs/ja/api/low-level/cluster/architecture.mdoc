@@ -3,7 +3,7 @@ title: Cluster のアーキテクチャ
 description: AkkEngine Cluster の実行時部品、ルーティング、レプリケーションフロー、通信形式、制約。
 ---
 
-このページは、Cluster runtime の内部構造を理解したい場合に読むページです。設定と起動例は [Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。
+このページは、Cluster 実行層の内部構造を理解したい場合に読むページです。設定と起動例は [Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。
 
 ## 実行時の部品
 
@@ -21,19 +21,19 @@ Cluster 実行層は、大きく 3 つの部品で構成されます。
 
 ## 制御層との境界
 
-Cluster は、完全な分散データベースの制御層より下の層です。engine runtime は entry replication、Replica 側での apply、membership config の検証、決定的な配置を担当します。一方で、クラスタ運用上の判断は現時点では外部の層が持ちます。
+Cluster は、完全な分散データベースの制御層より下の層です。エンジン実行層はエントリの複製、Replica 側での適用、メンバー構成の検証、決定的な配置を担当します。一方で、クラスタ運用上の判断は現時点では外部の層が持ちます。
 
 | 責務 | 現在の担当 |
 |---|---|
 | membership の source of truth | 外部 config / deployment tooling |
 | Primary election | 外部 orchestration |
 | split-brain 防止 | 外部 orchestration |
-| client traffic routing | API server、proxy、application layer |
+| クライアント通信のルーティング | API サーバー、プロキシ、アプリケーション層 |
 | snapshot transfer | 外部 backup / copy process |
 | striped data migration | 外部 migration process |
 | health-based failover | 外部 monitoring / orchestration |
 
-この境界は重要です。runtime は明示された role を受け入れるため、同じ write stream に対して 2 つの process を Primary として起動しても、Cluster 自身が片方を fence することはありません。
+この境界は重要です。実行層は明示された役割を受け入れるため、同じ書き込みストリームに対して二つのプロセスを Primary として起動しても、Cluster 自身が片方を停止させることはありません。
 
 ## 設定の検証
 
@@ -70,11 +70,11 @@ Cluster は、完全な分散データベースの制御層より下の層です
 | 層 | 決めること |
 |---|---|
 | `ClusterRouter` | `ClusterConfig` に基づいて、key を所有する node id を決めます。 |
-| Primary runtime | ローカル write stream をどの connected replica に送るかを扱います。 |
-| Replica runtime | 受信した frame を local engine にどう適用するかを扱います。 |
+| Primary 実行層 | ローカル書き込みストリームをどの接続済み Replica に送るかを扱います。 |
+| Replica 実行層 | 受信したフレームをローカルエンジンにどう適用するかを扱います。 |
 | Client router | application request をどの process に送るかを決めます。これは外部責務です。 |
 
-つまり、配置は data がどこにあるべきかを表し、レプリケーションは Primary runtime から Replica runtime へ write をコピーする現在の仕組みです。
+つまり、配置はデータがどこにあるべきかを表し、レプリケーションは Primary 実行層から Replica 実行層へ書き込みをコピーする現在の仕組みです。
 
 ## レプリケーションの流れ
 

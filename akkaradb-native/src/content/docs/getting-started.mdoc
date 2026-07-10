@@ -1,0 +1,110 @@
+---
+title: Getting Started
+description: Build AkkaraDB Native and create a durable typed C++ table in a few minutes.
+---
+
+Use the high-level `AkkaraDB` and `PackedTable` API first. It stores ordinary C++ structs, encodes them with BinPack, and handles primary keys, scans, and indexes without requiring a custom byte layout.
+
+Choose the low-level `AkkEngine` API only when your application already owns its byte encoding or key layout.
+
+## 1. Build The Native Library
+
+AkkaraDB Native requires LLVM Clang. On Windows, use `clang-cl` from a Visual Studio developer environment; on Linux and macOS, use `clang++`.
+
+```bash
+cmake --preset release
+cmake --build --preset release
+```
+
+On Windows, initialize the Visual Studio environment first:
+
+```powershell
+cmd /c "call \"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" >nul && cmake --preset windows-clang-cl-release && cmake --build --preset windows-clang-cl-release"
+```
+
+For an installed package, link the native target from your application CMake project:
+
+```cmake
+find_package(AkkaraDB REQUIRED)
+target_link_libraries(my_app PRIVATE AkkaraDB::akkaradb)
+```
+
+## 2. Define A Row And Open A Database
+
+Mark the fields that AkkaraDB should encode and expose to typed query helpers. The first macro argument after the type is the primary key.
+
+```cpp
+#include "akkaradb/AkkaraDB.hpp"
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+struct User {
+    uint64_t id;
+    std::string email;
+    std::string name;
+    uint32_t age;
+};
+
+AKKARADB_ENTITY(User, id, email, name, age)
+
+int main() {
+    auto db = akkaradb::AkkaraDB::open("data/app", akkaradb::StartupMode::NORMAL);
+    auto users = db->table<&User::id>("users");
+```
+
+`NORMAL` is the default embedded profile. Use `DURABLE` when synchronous WAL writes and VersionLog are required, or `FAST` for lower-overhead local workloads. See [AkkaraDB](/akkaradb-native/api/high-level/akkaradb/) for the profile details.
+
+## 3. Write, Read, And Scan
+
+`put()` inserts or replaces a row using its primary key. `get()` returns `std::optional<T>`, so handle absence explicitly.
+
+```cpp
+    users.put(User{1, "alice@example.test", "Alice", 30});
+
+    if (const auto alice = users.get(1)) {
+        std::cout << alice->name << " is " << alice->age << "\n";
+    }
+
+    auto rows = users.scanAll();
+    while (rows.hasNext()) {
+        const auto row = rows.next();
+        std::cout << row.value.email << "\n";
+    }
+```
+
+Table names and entity field order are part of persisted data compatibility. Do not rename a table or reorder/change stored fields without a migration plan.
+
+## 4. Add An Index Before Writing Indexed Data
+
+Register indexes immediately after opening the table and before writing the rows that must be found through them. Indexes are maintained on later writes, but existing rows are not automatically backfilled.
+
+```cpp
+    users.indexed<&User::email>()
+         .indexed<&User::age>();
+
+    users.put(User{2, "bob@example.test", "Bob", 24});
+
+    if (const auto bob = users.findBy<&User::email>("bob@example.test")) {
+        std::cout << bob->name << "\n";
+    }
+```
+
+Use `prefixIndexed<&Field>()` separately for hot string-prefix queries. It does not replace a normal index for equality lookups.
+
+## 5. Close Deliberately
+
+Close the database after the last table operation so the configured flush and sync policy runs before process exit.
+
+```cpp
+    db->close();
+}
+```
+
+## Next Steps
+
+- [High-Level API Usage](/akkaradb-native/api/high-level/usage/) for updates, queries, references, joins, and schema hooks.
+- [Query](/akkaradb-native/api/high-level/query/) for typed expressions and index planning.
+- [Low-Level API](/akkaradb-native/api/low-level/) when byte-oriented storage control is required.
+- [API Server](/akkaradb-native/api/low-level/api-server/) when another process needs HTTP, TCP, or gRPC access.

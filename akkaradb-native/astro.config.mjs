@@ -30,6 +30,7 @@ export default defineConfig({
 					translations: { ja: 'ガイド' },
 					items: [
 						{ label: 'Overview', translations: { ja: '概要' }, slug: '' },
+						{ label: 'Getting Started', translations: { ja: 'はじめに' }, slug: 'getting-started' },
 						{
 							label: 'High-Level API',
 							translations: { ja: '高レベル API' },

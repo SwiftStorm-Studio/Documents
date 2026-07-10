@@ -3,7 +3,7 @@ title: 低レベル API
 description: AkkEngine、API サーバー、Cluster、VersionLog を含む Native 低レベル層。
 ---
 
-低レベル API セクションは、Native のエンジン層を直接扱うための場所です。バイト列指向のストレージ制御、別プロセスからのエンジンアクセス、レプリケーション runtime、履歴とロールバックの基本操作を扱いたい場合に使います。
+低レベル API セクションは、Native のエンジン層を直接扱うための場所です。バイト列指向のストレージ制御、別プロセスからのエンジンアクセス、レプリケーション実行層、履歴とロールバックの基本操作を扱いたい場合に使います。
 
 ## コンポーネント
 
@@ -11,7 +11,7 @@ description: AkkEngine、API サーバー、Cluster、VersionLog を含む Nativ
 |---|---|
 | `AkkEngine` | バイト列キー / 値の基本操作、スキャン、設定、統計、ストレージ挙動、エンジンのライフサイクル。 |
 | API サーバー | HTTP、TCP、gRPC から `AkkEngine` インスタンスを扱う方法。 |
-| Cluster | Primary / Replica runtime、レプリケーション、ルーティング、ノード設定。 |
+| Cluster | Primary / Replica 実行層、レプリケーション、ルーティング、ノード設定。 |
 | VersionLog | 履歴、過去時点読み取り、ロールバック、ファイル配置、運用上の制限。 |
 
 ## 目的別に読む
