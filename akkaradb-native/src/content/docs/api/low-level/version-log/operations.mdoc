@@ -1,0 +1,63 @@
+---
+title: VersionLog Operations
+description: Production diagnostics, maintenance tooling, and operational checks for VersionLog.
+---
+
+Use this page when you operate a VersionLog-enabled engine in production or need to diagnose recovery, sidecar, retention, or parallel queue behavior.
+
+## Operational Signals
+
+VersionLog health is primarily visible through `AkkEngine::stats().vlog`. Stats are best-effort diagnostic snapshots, not transactionally consistent reads.
+
+| Field | Meaning | What to do |
+|---|---|---|
+| `recoveryDurationMicros` | Time spent in the latest recovery pass. | Track startup regression and compare with segment and entry counts. |
+| `recoveredSegmentCount`, `recoveredEntryCount` | Segments and entries accepted by recovery. | Unexpected drops suggest retention, durable-tail truncation, or failed recovery. |
+| `segmentCount`, `activeSegmentBytes` | Current segment fan-out and active segment size. | Tune `segmentBytes` and retention when history storage grows too quickly. |
+| `sidecarFallbackCount` | Queries that could not use `.akvidx` and scanned an authoritative segment. | Repeated growth means reads remain correct but may degrade to scans. |
+| `sidecarRebuildFailures` | Best-effort sidecar writes failed. | Check permissions, full disks, antivirus/file locks, and filesystem errors. |
+| `retentionPrunedSegments` | Closed segments deleted by retention. | Confirms retention is making progress. |
+| `retentionBaseEntriesWritten` | Synthetic base entries written before pruning. | High values mean many live keys cross the retention boundary. |
+| `parallelLaneCount` | Active `PARALLEL` lane count. | Confirms the resolved lane count. |
+| `parallelPendingWrites`, `parallelPendingBytes` | Lane work not yet persisted. | Sustained growth means storage cannot keep up or the pending-byte limit is too low. |
+| `parallelQueueRejects` | Writes rejected by the pending-byte limit. | Alert on sustained non-zero growth. |
+
+## Maintenance Tool
+
+The `akkaradb_vlog_tool` executable validates authoritative VersionLog segments and can rebuild derived sidecar indexes.
+
+```text
+akkaradb_vlog_tool validate --log <path> [--json]
+akkaradb_vlog_tool rebuild-indexes --log <path> [--json]
+```
+
+Both commands open the log through normal eager recovery. They validate `.akvlog` segments and may rewrite `.akvidx` sidecars. The tool refuses to create a new empty log when neither the base path nor a sibling segment exists.
+
+| Exit code | Meaning |
+|---:|---|
+| `0` | Recovery completed. |
+| `1` | Validation/open failed. |
+| `2` | `rebuild-indexes` completed recovery but sidecar regeneration reported failures. |
+
+Use `--json` when a supervisor or script should parse the result.
+
+## Recovery Failure Handling
+
+For recovery failures, the thrown `VersionLog:` error includes path context and, when available, the byte offset and sequence number. The segment file remains the source of truth.
+
+Do not delete `.akvlog` or `.akvtail` files unless the data set is intentionally being discarded or restored from backup. Deleting or rewriting `.akvidx` sidecars is safe because they are derived.
+
+## Backup Guidance
+
+Preserve VersionLog files together with the engine WAL, SST, Manifest, and Blob files. A filesystem-level backup should keep these components from the same engine point in time:
+
+```text
+*.akvlog
+*.akvtail
+wal/
+sstable/
+manifest.akmf
+blobs/
+```
+
+Sidecar `.akvidx` files are useful for faster startup and reads, but they are not the source of truth and can be rebuilt.

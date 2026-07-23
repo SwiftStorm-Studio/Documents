@@ -1,13 +1,11 @@
 ---
 title: VersionLog Architecture
-description: How VersionLog stores history, rebuilds indexes, handles durability, and interacts with Blob storage.
+description: How VersionLog stores history, indexes segments, recovers durable prefixes, and prunes retained history.
 ---
 
-Use this page when you need to understand how VersionLog works internally. For configuration and API examples, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/).
+Use this page when you need to understand how VersionLog works internally. For configuration and API examples, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/). For production monitoring and maintenance commands, see [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
 
-## Architecture
-
-### Write Path
+## Write Path
 
 When VersionLog is enabled, each engine mutation flows through the same sequence as the live storage path:
 
@@ -15,110 +13,104 @@ When VersionLog is enabled, each engine mutation flows through the same sequence
 2. Append to WAL when WAL is enabled.
 3. Append a VersionLog entry.
 4. Apply the mutation to MemTable.
-5. Ship the mutation through the cluster runtime when cluster mode is enabled.
+5. Publish the VersionLog commit frontier for `COMMIT_ORDER` visibility.
+6. Ship the mutation through the cluster runtime when cluster mode is enabled.
 
-The VersionLog stores the same value representation used by the storage path. If a large value is externalized into Blob storage, the history entry stores the blob reference and flag, not a second full copy of the value.
+`COMMIT_ORDER` history and `getAt()` never expose a VersionLog entry ahead of the engine mutation that committed it. `APPLIED` is the lower-latency option that can expose appended history earlier.
 
-### In-Memory Index
+## Entry Format
 
-On append, VersionLog updates an in-memory map from key bytes to sorted `VersionEntry` vectors. `history()` reads that vector, and `getAt()` uses binary search to find the last entry at or before the requested sequence.
-
-On startup, the `.akvlog` file is replayed into the same index. This means historical reads are fast after open, but memory usage grows with retained history.
-
-The index is maintained under VersionLog locking. Public VersionLog methods are thread-safe, but long history vectors still have normal cost: `history()` copies the vector out, and `getAt()` performs a binary search inside the per-key vector.
-
-### File Format
-
-The file starts with a 32-byte header:
-
-| Field | Meaning |
-|---|---|
-| magic | `AKV5` |
-| version | Current file format version. |
-| syncModeHint | Sync mode used when the file was created. |
-| createdNs | Creation timestamp placeholder. |
-| crc32c | Header checksum. |
-
-Each entry contains:
+Each `.akvlog` segment starts with a 32-byte `AKV5` v1 header. Entries store a packed header, raw key bytes, stored value bytes, and a trailing CRC32C.
 
 | Field | Meaning |
 |---|---|
 | `seq` | Engine sequence number. |
 | `sourceNodeId` | Local node, replica source node, or rollback sentinel. |
 | `timestampNs` | Append timestamp. |
-| `flags` | Storage flags, including tombstone/blob/rollback markers. |
-| `keyFp64` | Key fingerprint for diagnostics and future indexing. |
+| `flags` | Storage flags, including compression, rollback, and retention-base markers. |
+| `keyFp64` | Key fingerprint for indexing. |
 | `key` | Raw key bytes. |
-| `value` | Stored value bytes or blob reference bytes. |
+| `value` | Raw value, compressed value payload, or blob reference bytes. |
 | `crc32c` | Entry checksum. |
-
-Corrupt headers, malformed entry lengths, truncated entries, and CRC mismatches are treated as errors during open. The reader does not silently skip damaged entries.
 
 The current entry size limit is 32 MiB. Keys larger than `uint16_t` and values larger than `uint32_t` are rejected by the serializer.
 
-### Recovery Behavior
+## Compression
 
-Opening an existing VersionLog performs strict replay:
+With `codec = ZSTD`, VersionLog attempts to compress each value. The stored value begins with a four-byte uncompressed size followed by the Zstd payload. If compression is not smaller than the raw value plus the prefix, the entry is stored uncompressed.
 
-1. Read and validate the file header.
-2. Read each entry length.
-3. Verify entry bounds and CRC32C.
-4. Reconstruct `VersionEntry` values.
-5. Insert each entry into the per-key sorted index.
+Public `VersionEntry` values are always exposed as decompressed bytes, and the internal compression flag is stripped before returning to callers.
 
-If the file is corrupt, open fails instead of returning a partial history view. This is better for correctness, but it means operational recovery needs a separate repair or restore procedure when the history file is damaged.
+## Segments And Sidecars
 
-### Rollback Entries
+The base `logPath` is segment `0`; later segments insert `-seg-N` before the extension. For example:
+
+```text
+history.akvlog
+history-seg-1.akvlog
+history-seg-2.akvlog
+```
+
+Each segment may have a derived `.akvidx` sidecar:
+
+```text
+history.akvidx
+history-seg-1.akvidx
+```
+
+Sidecars store a Bloom filter and a sorted mapping from key fingerprint to `(seq, VLog byte offset)` records. `history()` uses the Bloom filter to skip impossible segments and reads only matching key offsets. `getAt()` can binary-search per-key sequences and read the selected record directly.
+
+The `.akvlog` segment is authoritative. A missing, stale, malformed, or unwritable `.akvidx` sidecar causes a safe segment scan and never makes valid VLog data unreadable. Recovery, rotation, clean close, retention-base creation, and the maintenance tool attempt to regenerate sidecars.
+
+## Active Index Memory
+
+VersionLog does not keep all historical values in memory. Closed segments are represented by compact segment metadata and sidecar indexes. The active segment keeps only key-to-offset metadata while it is mutable, bounded by `segmentBytes`.
+
+If `segmentBytes = 0`, active metadata is disabled for the single-file mode, and reads safely fall back to file scans rather than accumulating unbounded in-memory history.
+
+Async writes that have not reached disk are retained as a small resident overlay so readers can see the configured visibility boundary.
+
+## Parallel Lane Storage
+
+`PARALLEL` write admission assigns each key to a lane by stable fingerprint. Each lane owns its active segment, queue, worker, active index, and durable tail. Different lanes can persist concurrently, while the same key remains ordered through one lane.
+
+`PARALLEL` mode writes an `.akvtail` file beside each active lane segment. The tail records the durable contiguous byte length. Recovery scans only that prefix and ignores bytes after it, so interrupted lane appends cannot become visible history.
+
+## Recovery
+
+Recovery discovers all segment files, validates file headers, validates each entry length and CRC32C, reconstructs segment metadata, rebuilds sidecars, and restores the active index for the latest segment.
+
+`EAGER` recovery performs this before `open` returns. `BACKGROUND` recovery returns after opening the active file, then VersionLog and `AkkEngine` operations wait for the recovery barrier before they observe or mutate engine state.
+
+Corruption is never accepted. Recovery errors include `VersionLog:` context with the file path and, when available, entry offset and sequence number.
+
+## Retention
+
+Retention is segment-granular and disabled by default. `retentionDays` and `retentionMinCommitSeq` are ORed: a closed segment can be pruned when its file age reaches the age boundary or its highest sequence is below the sequence boundary.
+
+Before deleting expired segments, VersionLog writes synthetic `VLOG_FLAG_RETENTION_BASE` entries for keys whose latest value at the retained boundary would otherwise disappear. This preserves the state needed by `getAt()`, `history()`, and rollback from the retained window forward.
+
+Queries before the base boundary remain unavailable. Retention never deletes the active segment and keeps segments that reach beyond the current commit frontier.
+
+## Blob Interaction
+
+Blob GC is rejected while VersionLog is enabled. Historical entries may still refer to previous blob values, and deleting those blobs would break point-in-time reads. VersionLog retention reduces history segments; it does not by itself prove that a blob is unreferenced.
+
+## Rollback Entries
 
 Rollback operations use `sourceNodeId = ROLLBACK_NODE` and set `VLOG_FLAG_ROLLBACK`. Stats expose those entries through `vlog.rollbackEntries`.
 
 Rollback restores state by writing new records. If the target sequence has no prior value for a key, rollback writes a tombstone. If the target sequence has a value, rollback writes that value again as the current state.
 
-### Blob Interaction
+## Test Coverage
 
-Blob GC is rejected while VersionLog is enabled. Historical entries can still refer to previous blob values, and deleting those blobs would break point-in-time reads.
-
-If your workload needs both history and large values, treat blob files as retained by history until you have a separate history retention or compaction policy.
-
-### Sizing And Tuning
-
-VersionLog cost is roughly proportional to the number of retained mutations, not the number of live keys.
-
-| Workload shape | Main cost |
-|---|---|
-| Many updates to a few keys | Large per-key vectors; `history(key)` returns large copies. |
-| Many keys with shallow history | Larger index map; startup replay touches many keys. |
-| Large inline values | Larger `.akvlog` file and more queued bytes. |
-| Blob-heavy values | History entries are smaller, but old blob files remain referenced. |
-
-For write-heavy workloads, start with `BATCHED_SYNC`, then watch `vlog.pendingBytes`, `vlog.asyncMaxPendingBytes`, and write latency. If pending bytes remain high, lower the grouping window, raise flush capacity through deployment choices, or switch to a stricter sync mode only where the workload needs it.
-
-### Operational Signals
-
-Watch these stats when VersionLog is enabled:
-
-| Field | What to watch |
-|---|---|
-| `vlog.pendingBytes` | Growth toward `vlog.asyncMaxPendingBytes` indicates history flush pressure. |
-| `vlog.indexedEntries` | Direct proxy for retained history size. |
-| `vlog.rollbackEntries` | Should only grow when rollback APIs are used. |
-| `vlog.durableBytes` | Confirms the history file is receiving flushed data. |
-| `vlog.flushThreadRunning` | Should be true for `ASYNC` and `BATCHED_SYNC`. |
-
-### Test Coverage
-
-The current smoke coverage checks:
+Current smoke coverage checks:
 
 | Test behavior | Covered behavior |
 |---|---|
-| Append and query | `append()`, `history()`, `getAt()`, snapshot counters. |
-| Recovery | Reopening `history.akvlog` rebuilds history. |
-| Corruption detection | Header or entry corruption causes open to throw. |
-| Rollback target collection | Keys newer than a target sequence are selected correctly. |
-| Batched sync recovery | `BATCHED_SYNC` entries survive close and reopen. |
-
-Use these as the baseline behavior when changing the VersionLog implementation.
-
-### Limits
-
-VersionLog currently retains history indefinitely. It does not yet provide retention windows, history compaction, key-range pruning, or a separate history GC path. It also does not expose time-based lookup; sequence number is the lookup cursor. Plan disk and memory usage accordingly when enabling it on long-lived datasets.
+| Admission and visibility | `COMMIT_ORDER`, `APPLIED`, serial admission, parallel admission, background recovery. |
+| Segment index fallback | Missing or corrupt `.akvidx` falls back to authoritative segment scans. |
+| Recovery corruption | Corrupt CRC and truncated committed entries fail recovery. |
+| Parallel durable tail | Recovery ignores bytes after the `.akvtail` durable prefix. |
+| Concurrent reads/writes | Parallel writers and readers preserve sorted histories and values. |
+| Maintenance tool | `validate` and `rebuild-indexes` rebuild derived sidecars and refuse missing logs. |

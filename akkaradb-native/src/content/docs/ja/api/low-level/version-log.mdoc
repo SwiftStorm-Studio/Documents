@@ -1,19 +1,37 @@
 ---
 title: VersionLog
-description: AkkEngine のキー単位履歴、過去時点読み取り、ロールバックの説明です。
+description: AkkEngine のキー単位履歴、過去時点読み取り、ロールバック、保持、運用の説明です。
 ---
 
 `VersionLog` は、`AkkEngine::history()`、`AkkEngine::getAt()`、`AkkEngine::rollbackKey()`、`AkkEngine::rollbackTo()` の裏側で使われる任意の履歴レイヤーです。
 
-過去時点の読み取り、キー単位の変更履歴、ロールバックが必要な場合に有効化します。最新値だけを扱えばよいワークロードでは、追加の書き込み経路、メモリ上の履歴インデックス、履歴ログファイルを避けるために無効のままで構いません。
+過去時点の読み取り、キー単位の変更履歴、ロールバックが必要な場合に有効化します。最新値だけを扱えばよいワークロードでは、書き込み経路を短く保つために無効のままで構いません。
+
+## できること
+
+| 機能 | 契約 |
+|---|---|
+| キー単位の履歴 | commit された mutation を `VersionEntry` として確認できます。 |
+| 過去時点読み取り | `getAt(key, seq)` は指定シーケンス以前で見える値を返します。 |
+| ロールバック | `rollbackKey()` と `rollbackTo()` は新しい mutation を追加して状態を戻します。古い履歴は書き換えません。 |
+| 圧縮 | 任意で Zstd 圧縮できます。公開 API では展開済み bytes を返します。 |
+| セグメント化 | 履歴は `.akvlog` segment に分割でき、派生 `.akvidx` sidecar を持ちます。 |
+| 保持期間 | age または sequence 境界で閉じた segment を削除し、必要な境界状態は synthetic base entry として残せます。 |
+| 並列書き込み lane | `PARALLEL` admission では独立した lane segment に履歴を書けます。 |
+| 診断 | recovery、sidecar、retention、parallel queue の統計を公開します。 |
 
 ## 目的別に読む
 
 | 目的 | ページ |
 |---|---|
 | 履歴を有効化し、`VersionEntry` を読み、ロールバック API を呼ぶ | [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) |
-| 書き込み経路、ファイル形式、復旧、Blob との関係、制限を理解する | [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) |
+| 書き込み経路、ファイル、sidecar、復旧、保持、Blob との関係を理解する | [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) |
+| 本番運用で見る統計、保守ツール、障害時の扱いを確認する | [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) |
 
 ## 対象範囲
 
-VersionLog は保持された mutation history を記録します。古いエントリの期限切れ、履歴コンパクション、古い blob reference の GC は行いません。それらのポリシーは、現在のエンジン層の上で用意する前提です。
+VersionLog が authoritative なのは、履歴値と rollback 判断です。現在値の読み書きは、通常の MemTable、WAL、SST、Blob、任意の Cluster component を通ります。
+
+`.akvidx` sidecar は派生ファイルです。欠損、古さ、破損があっても、有効な `.akvlog` データは読めなくなりません。VersionLog は authoritative segment scan に fall back し、recovery、rotation、clean close、保守ツールで sidecar の再生成を試みます。
+
+VersionLog が有効な間、Blob GC は引き続き非対応です。古い履歴が過去の blob value を参照している可能性があります。VersionLog retention は履歴 segment を減らすための機能であり、それだけで blob が未参照になったとは判断しません。

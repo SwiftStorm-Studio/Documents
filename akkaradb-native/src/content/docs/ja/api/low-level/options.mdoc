@@ -133,10 +133,18 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 | `vlog.groupMicros` | `500` | まとめてフラッシュする最大待ち時間です。 |
 | `vlog.groupBytes` | `1 MiB` | まとめてフラッシュする最大バイト数です。 |
 | `vlog.asyncMaxPendingBytes` | `64 MiB` | 未同期の履歴ログデータ上限です。 |
+| `vlog.writeAdmission` | `SERIAL` | 書き込み admission mode です。`SERIAL`、`PREPARE_PARALLEL`、`PARALLEL` があります。 |
+| `vlog.parallelWriteLanes` | `0` | parallel writer lane 数です。`0` は `PARALLEL` 利用時に hardware 由来の上限付き値を選びます。 |
+| `vlog.recoveryMode` | `EAGER` | recovery mode です。`EAGER` または `BACKGROUND` があります。 |
+| `vlog.codec` | `NONE` | VersionLog value codec です。`NONE` または `ZSTD` があります。 |
+| `vlog.zstdCompressionLevel` | `1` | `codec = ZSTD` の場合に、新規 VersionLog record に使う Zstd level です。 |
+| `vlog.segmentBytes` | `64 MiB` | active segment の rotation size です。`0` で rotation を無効化します。 |
+| `vlog.retentionDays` | `0` | closed segment を削除する age boundary です。`0` で age boundary を無効化します。 |
+| `vlog.retentionMinCommitSeq` | `0` | closed segment を削除する commit-sequence boundary です。`0` で sequence boundary を無効化します。 |
 
 `history()`、`getAt()`、`rollbackKey()`、`rollbackTo()` を使う場合は、エンジンを開く前に `components.versionLogEnabled` を有効化します。
 
-使い方とロールバックの挙動は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に、ファイル形式と運用時の注意点は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。
+使い方とロールバックの挙動は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に、ファイル形式と recovery の挙動は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。診断と保守コマンドは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
 
 ## Manifest とクラスタ
 

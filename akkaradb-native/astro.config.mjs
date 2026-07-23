@@ -114,6 +114,7 @@ export default defineConfig({
 											translations: { ja: 'アーキテクチャ' },
 											slug: 'api/low-level/version-log/architecture',
 										},
+										{ label: 'Operations', translations: { ja: '運用' }, slug: 'api/low-level/version-log/operations' },
 									],
 								},
 							],

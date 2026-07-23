@@ -1,19 +1,37 @@
 ---
 title: VersionLog
-description: Per-key history, point-in-time reads, and rollback behavior in AkkEngine.
+description: Per-key history, point-in-time reads, rollback, retention, and operational behavior in AkkEngine.
 ---
 
 `VersionLog` is the optional history layer behind `AkkEngine::history()`, `AkkEngine::getAt()`, `AkkEngine::rollbackKey()`, and `AkkEngine::rollbackTo()`.
 
-Enable it when you need point-in-time reads, audit-style per-key history, or rollback support. Leave it disabled for workloads that only need the latest value and want to avoid the extra write path, in-memory history index, and history log file.
+Enable it when you need point-in-time reads, audit-style per-key history, or rollback support. Leave it disabled for workloads that only need the latest value and want the smallest write path.
+
+## What It Provides
+
+| Capability | Contract |
+|---|---|
+| Per-key history | Every committed mutation can be inspected as a `VersionEntry`. |
+| Point-in-time read | `getAt(key, seq)` resolves the visible value at or before an engine sequence. |
+| Rollback | `rollbackKey()` and `rollbackTo()` restore state by appending new mutations; old history is not rewritten. |
+| Compression | Values can be stored with opt-in Zstd compression while public reads return decompressed bytes. |
+| Segmentation | History can rotate into `.akvlog` segments with derived `.akvidx` sidecars. |
+| Retention | Closed segments can be pruned by age or sequence while synthetic base entries preserve the retained boundary state. |
+| Parallel write lanes | `PARALLEL` admission can persist history through independently locked lane segments. |
+| Diagnostics | Stats expose recovery, sidecar, retention, and parallel queue signals. |
 
 ## Read By Goal
 
 | Goal | Page |
 |---|---|
 | Enable history, inspect `VersionEntry`, and call rollback APIs | [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/) |
-| Understand write path, file format, recovery, Blob interaction, and limits | [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/) |
+| Understand write path, files, sidecars, recovery, retention, and Blob interaction | [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/) |
+| Monitor production health, interpret counters, and run maintenance tooling | [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/) |
 
 ## Scope
 
-VersionLog records retained mutation history. It does not expire old entries, compact history, or garbage-collect old blob references. Those policies have to be added above the current engine layer.
+VersionLog is authoritative only for historical values and rollback decisions. The current value path still goes through the normal MemTable, WAL, SST, Blob, and optional Cluster components.
+
+Derived sidecar indexes are optimization files. A missing or corrupt `.akvidx` sidecar does not make valid `.akvlog` data unreadable; VersionLog safely falls back to scanning the authoritative segment and attempts to rebuild sidecars during recovery, rotation, clean close, and maintenance tooling.
+
+Blob GC remains incompatible with enabled VersionLog because old history may still reference previous blob values. Retention can reduce VersionLog segments, but it is not a Blob GC policy by itself.

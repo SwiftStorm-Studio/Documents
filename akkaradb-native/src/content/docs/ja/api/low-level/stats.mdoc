@@ -118,10 +118,23 @@ const double readHitRate =
 | `vlog.pendingBytes` | まだフラッシュされていない履歴ログのバイト数です。 |
 | `vlog.durableBytes` | 永続化済みの履歴ログバイト数です。 |
 | `vlog.flushThreadRunning` | 非同期フラッシュスレッドが動作中かどうかです。 |
+| `vlog.recoveryDurationMicros` | 直近 recovery の所要時間です。 |
+| `vlog.recoveredSegmentCount` | 直近 recovery で走査した segment 数です。 |
+| `vlog.recoveredEntryCount` | 直近 recovery で受け入れた entry 数です。 |
+| `vlog.segmentCount` | 現在の VersionLog segment 数です。 |
+| `vlog.activeSegmentBytes` | active segment のバイト数です。 |
+| `vlog.sidecarFallbackCount` | sidecar 欠損や失敗により segment scan へ fallback した回数です。 |
+| `vlog.sidecarRebuildFailures` | 派生 sidecar index の再構築失敗回数です。 |
+| `vlog.retentionPrunedSegments` | retention により削除された closed segment 数です。 |
+| `vlog.retentionBaseEntriesWritten` | retention pruning 前に書かれた synthetic base entry 数です。 |
+| `vlog.parallelLaneCount` | 有効な parallel writer lane 数です。 |
+| `vlog.parallelPendingWrites` | parallel lane 全体の未処理 write 数です。 |
+| `vlog.parallelPendingBytes` | parallel lane 全体の未処理バイト数です。 |
+| `vlog.parallelQueueRejects` | pending queue budget 超過で拒否された write 数です。 |
 
-`pendingBytes` と `asyncMaxPendingBytes` はバックプレッシャーの兆候を見るために使います。`rollbackEntries` はロールバック API を使った場合だけ増えるのが自然です。
+`pendingBytes`、`parallelPendingBytes`、`asyncMaxPendingBytes` はバックプレッシャーの兆候を見るために使います。`rollbackEntries` はロールバック API を使った場合だけ増えるのが自然です。
 
-これらの値と書き込み経路、ファイル永続化の関係は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。
+これらの値と書き込み経路、ファイル永続化の関係は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。本番での読み方と保守ツールは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
 
 ## API 統計
 

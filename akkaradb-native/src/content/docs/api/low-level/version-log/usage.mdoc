@@ -1,13 +1,11 @@
 ---
 title: VersionLog Usage
-description: How to enable version history, read historical values, and run rollback operations.
+description: How to enable version history, read historical values, configure durability, and run rollback operations.
 ---
 
-Use this page when you want to enable VersionLog and call history, point-in-time read, or rollback APIs. For storage layout, recovery, durability boundaries, and operational limits, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/).
+Use this page when you want to enable VersionLog and call history, point-in-time read, or rollback APIs. For storage layout, recovery, sidecars, retention, and operational limits, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/) and [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
 
-## Usage
-
-### Enable History
+## Enable History
 
 Version history is disabled by default. Enable it before opening the engine.
 
@@ -22,7 +20,60 @@ auto db = akkaradb::engine::AkkEngine::open(std::move(opts));
 
 When `paths.dataDir` is set, `paths.versionLogPath` is derived as `<dataDir>/history.akvlog`. If you set `opts.vlog.logPath` directly, it overrides the derived path.
 
-### Read Key History
+## Choose Durability
+
+VersionLog and WAL are separate components. A durable latest-value path does not automatically mean every history entry has crossed a VersionLog sync boundary.
+
+| Mode | Behavior | Typical use |
+|---|---|---|
+| `SYNC` | Writes and durability-syncs each VersionLog entry before returning. | Strongest history durability, lower write throughput. |
+| `ASYNC` | Updates the readable history immediately and flushes the file through a background worker. | Higher throughput when a small history durability window is acceptable. |
+| `BATCHED_SYNC` | Uses the background worker, then durability-syncs grouped batches. | Balanced mode for durable history without one sync per write. |
+
+`groupN`, `groupMicros`, and `groupBytes` control async and batched flush grouping. `asyncMaxPendingBytes` limits queued history bytes and can apply backpressure to writers.
+
+Use `AkkEngine::forceSync()` at application checkpoint boundaries when recent history must cross the durable boundary before continuing.
+
+## Optional Compression
+
+VersionLog compression is opt-in.
+
+```cpp
+opts.vlog.codec = akkaradb::engine::vlog::VLogCodec::ZSTD;
+opts.vlog.zstdCompressionLevel = 1;
+```
+
+Compressed records retain their original value size internally and are decompressed before `VersionEntry` values are returned. A record is stored compressed only when the compressed payload plus its size prefix is smaller than the raw value.
+
+## Segmentation And Retention
+
+By default, VersionLog uses segmented storage with `segmentBytes = 64 MiB`. Set retention boundaries when old history should be pruned from closed segments.
+
+```cpp
+opts.vlog.segmentBytes = 64ULL * 1024ULL * 1024ULL;
+opts.vlog.retentionDays = 30;
+opts.vlog.retentionMinCommitSeq = 0;
+```
+
+`retentionDays` and `retentionMinCommitSeq` are ORed. A closed segment is eligible when either boundary matches. Before deletion, VersionLog writes synthetic retention-base entries for keys whose boundary state would otherwise disappear, so retained history still has a usable starting point.
+
+Queries before the retained base boundary are unavailable. `history()` may return a synthetic first entry marked with `VLOG_FLAG_RETENTION_BASE`.
+
+## Parallel Write Admission
+
+For write-heavy local workloads, `PARALLEL` admission can persist VersionLog records through independent lane workers.
+
+```cpp
+opts.vlog.syncMode = akkaradb::engine::vlog::VLogSyncMode::ASYNC;
+opts.vlog.writeAdmission = akkaradb::engine::vlog::VLogWriteAdmissionMode::PARALLEL;
+opts.vlog.parallelWriteLanes = 4;
+opts.vlog.parallelPendingLimitScope =
+    akkaradb::engine::vlog::VLogParallelPendingLimitScope::GLOBAL;
+```
+
+`PARALLEL` requires `syncMode = ASYNC`. Writes for the same key remain ordered by stable key fingerprint lane selection. `GLOBAL` applies `asyncMaxPendingBytes` once across all lanes; `PER_LANE` applies it independently per lane.
+
+## Read Key History
 
 Every successful write appends a `VersionEntry` for the key.
 
@@ -42,21 +93,19 @@ for (const auto& entry : history) {
 
 `history(key)` returns entries ordered by sequence number. If VersionLog is disabled or the key has no history, it returns an empty vector.
 
-### Interpret Version Entries
-
-`VersionEntry` stores the engine-level record that was appended for a key.
+## Interpret Version Entries
 
 | Field | Meaning |
 |---|---|
 | `seq` | Monotonic engine sequence number for the mutation. Use this as the input to `getAt()` or rollback APIs. |
 | `sourceNodeId` | Origin of the mutation. Local writes use the local source, replica-applied writes carry the source node, and rollback writes use `ROLLBACK_NODE`. |
-| `timestampNs` | Append timestamp recorded by the engine. It is useful for diagnostics, but sequence number is the authoritative ordering key. |
-| `flags` | Storage flags. Tombstone means deletion, blob means the stored value is a blob reference, rollback marks rollback-generated writes. |
-| `value` | Stored bytes. This is the inline value for normal records, or a blob reference when the blob flag is set. |
+| `timestampNs` | Append timestamp recorded by the engine. Useful for diagnostics; not the ordering key. |
+| `flags` | Storage flags. Rollback and retention-base entries are marked here. |
+| `value` | Public value bytes. Compressed VersionLog records are decompressed before exposure. |
 
 Treat `seq` as the stable history cursor. Wall-clock time is metadata; it is not used to resolve `getAt()`.
 
-### Read At A Sequence
+## Read At A Sequence
 
 `getAt(key, seq)` returns the latest historical value whose sequence is less than or equal to `seq`.
 
@@ -74,7 +123,7 @@ if (previous) {
 
 If the matching historical entry is a tombstone, `getAt()` returns `std::nullopt`. If VersionLog is disabled, it also returns `std::nullopt`.
 
-### API Semantics
+## API Semantics
 
 | API | VersionLog disabled | Missing key or no visible value | Closed engine |
 |---|---|---|---|
@@ -85,7 +134,7 @@ If the matching historical entry is a tombstone, `getAt()` returns `std::nullopt
 
 The rollback APIs are write APIs. They reserve new sequence numbers, append WAL and VersionLog records when enabled, update MemTable, and ship through Cluster when replication is enabled.
 
-### Roll Back One Key
+## Roll Back One Key
 
 `rollbackKey(key, targetSeq)` writes a new record that restores the key to its state at `targetSeq`.
 
@@ -98,9 +147,9 @@ if (!history.empty()) {
 
 Rollback is not an in-place rewrite of the history file. It appends a new engine mutation, marks the VersionLog entry with the rollback flag, and preserves the previous history.
 
-### Roll Back All Changed Keys
+## Roll Back All Changed Keys
 
-`rollbackTo(targetSeq)` scans the VersionLog index and restores every key whose latest known version is newer than `targetSeq`.
+`rollbackTo(targetSeq)` scans VersionLog history and restores every key whose latest known version is newer than `targetSeq`.
 
 ```cpp
 db->rollbackTo(checkpointSeq);
@@ -108,46 +157,7 @@ db->rollbackTo(checkpointSeq);
 
 Use this carefully. It creates new writes for all affected keys, and in cluster mode those rollback writes are shipped through the replication runtime.
 
-### Rollback Checklist
-
-Before using rollback in application code, make the target sequence explicit and store it somewhere outside the key you are about to modify.
-
-```cpp
-const auto beforeUpdate = db->history(bytes("profile:1"));
-const uint64_t restoreSeq = beforeUpdate.empty() ? 0 : beforeUpdate.back().seq;
-
-db->put(bytes("profile:1"), bytes("candidate"));
-
-if (!validateProfile()) {
-    db->rollbackKey(bytes("profile:1"), restoreSeq);
-}
-```
-
-If `restoreSeq` is earlier than the first known version for a key, rollback writes a tombstone. That is useful for reverting newly-created keys, but it should be intentional.
-
-### Choose A Sync Mode
-
-| Mode | Behavior | Typical use |
-|---|---|---|
-| `SYNC` | Writes and durability-syncs each VersionLog entry before returning. | Strongest history durability, lower write throughput. |
-| `ASYNC` | Updates the in-memory history immediately and flushes the file through a background worker. | Higher throughput when a small history durability window is acceptable. |
-| `BATCHED_SYNC` | Uses the background worker, then durability-syncs grouped batches. | Balanced default for durable history without one sync per write. |
-
-`groupN`, `groupMicros`, and `groupBytes` control when asynchronous batches are flushed. `asyncMaxPendingBytes` limits queued history bytes and can apply backpressure to writers.
-
-### Durability Expectations
-
-VersionLog and WAL are separate components. A durable latest-value path does not automatically mean every history entry has crossed a VersionLog sync boundary.
-
-| Mode | In-memory visibility | File write timing | Durability boundary |
-|---|---|---|---|
-| `SYNC` | Updated before the call returns. | Written before the call returns. | Entry is synced before return. |
-| `ASYNC` | Updated before the call returns. | Queued for the background worker. | `forceSync()` or worker flush; crash may lose recent history entries. |
-| `BATCHED_SYNC` | Updated before the call returns. | Queued for grouped worker flush. | Batch sync; crash window is bounded by grouping behavior. |
-
-If the application uses history for user-visible rollback guarantees, prefer `SYNC` or `BATCHED_SYNC` and call `forceSync()` at explicit checkpoint boundaries.
-
-### Sync And Close
+## Sync And Close
 
 `AkkEngine::forceSync()` syncs both WAL and VersionLog when they are enabled.
 
@@ -156,4 +166,4 @@ db->forceSync();
 db->close();
 ```
 
-`close()` stops the VersionLog background worker, flushes the file, and surfaces any async write error that occurred earlier.
+`close()` stops VersionLog workers, flushes files, writes derived sidecars where applicable, and surfaces any async write error that occurred earlier.

@@ -1,124 +1,116 @@
 ---
 title: VersionLog のアーキテクチャ
-description: VersionLog の保存形式、インデックス再構築、永続化境界、Blob との関係です。
+description: VersionLog の保存形式、segment index、durable prefix 復旧、履歴保持の仕組みです。
 ---
 
-このページは、VersionLog の内部構造を理解したい場合に読むページです。設定と API の使用例は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に分けています。
+このページは、VersionLog の内部構造を理解したい場合に読むページです。設定と API の使用例は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に分けています。本番運用の監視と保守コマンドは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
 
-## アーキテクチャ
-
-### 書き込み経路
+## 書き込み経路
 
 VersionLog が有効な場合、各エンジン mutation は live storage と同じ流れの中で記録されます。
 
 1. 新しいエンジンシーケンス番号を確保する。
 2. WAL が有効なら WAL に追加する。
-3. VersionLog エントリを追加する。
+3. VersionLog entry を追加する。
 4. MemTable に mutation を反映する。
-5. cluster mode が有効ならレプリケーション実行層へ送る。
+5. `COMMIT_ORDER` visibility 用に VersionLog commit frontier を進める。
+6. cluster mode が有効ならレプリケーション実行層へ送る。
 
-VersionLog は storage path と同じ値表現を保存します。大きな値が Blob storage に外部化される場合、履歴エントリには値の完全コピーではなく、blob reference と flag が保存されます。
+`COMMIT_ORDER` の `history()` と `getAt()` は、対応するエンジン mutation より先に VersionLog entry を見せません。`APPLIED` は低 latency のために、append 済み履歴をより早く見せる option です。
 
-### メモリ上のインデックス
+## entry format
 
-append 時、VersionLog は key bytes から `VersionEntry` のソート済み vector へ対応するメモリ上の map を更新します。`history()` はその vector を返し、`getAt()` は二分探索で指定シーケンス以下の最後のエントリを探します。
-
-起動時には `.akvlog` ファイルを読み直し、同じインデックスを再構築します。このため open 後の履歴読み取りは速い一方、保持している履歴量に応じてメモリ使用量も増えます。
-
-インデックスは VersionLog の lock の下で管理されます。public method は thread-safe ですが、巨大な履歴 vector には通常のコストがあります。`history()` は vector をコピーして返し、`getAt()` はキー単位 vector の中を二分探索します。
-
-### ファイル形式
-
-ファイルは 32 byte のヘッダーから始まります。
-
-| フィールド | 意味 |
-|---|---|
-| magic | `AKV5` |
-| version | 現在のファイル形式バージョンです。 |
-| syncModeHint | ファイル作成時の同期モードです。 |
-| createdNs | 作成時刻用の領域です。 |
-| crc32c | ヘッダーのチェックサムです。 |
-
-各エントリは次の情報を持ちます。
+各 `.akvlog` segment は 32 byte の `AKV5` v1 header から始まります。entry は packed header、生 key bytes、stored value bytes、末尾 CRC32C を持ちます。
 
 | フィールド | 意味 |
 |---|---|
 | `seq` | エンジンのシーケンス番号です。 |
 | `sourceNodeId` | ローカルノード、レプリカ元ノード、または rollback sentinel です。 |
 | `timestampNs` | append 時刻です。 |
-| `flags` | tombstone、blob、rollback などの storage flag です。 |
-| `keyFp64` | 診断と将来のインデックス用途のキー fingerprint です。 |
+| `flags` | compression、rollback、retention-base などの storage flag です。 |
+| `keyFp64` | index 用の key fingerprint です。 |
 | `key` | 生の key bytes です。 |
-| `value` | 保存値の bytes、または blob reference bytes です。 |
-| `crc32c` | エントリのチェックサムです。 |
-
-ヘッダー破損、不正なエントリ長、途中で切れたエントリ、CRC mismatch は open 時にエラーになります。壊れたエントリを黙って読み飛ばす挙動ではありません。
+| `value` | raw value、compressed value payload、または blob reference bytes です。 |
+| `crc32c` | entry checksum です。 |
 
 現在の entry size limit は 32 MiB です。`uint16_t` に収まらない key、`uint32_t` に収まらない value は serializer で拒否されます。
 
-### 復旧時の挙動
+## 圧縮
 
-既存の VersionLog を open するときは、厳密に replay します。
+`codec = ZSTD` の場合、VersionLog は各 value の圧縮を試みます。保存 value は 4 byte の非圧縮サイズと Zstd payload から始まります。圧縮 payload と prefix の合計が raw value より小さくない場合、その entry は非圧縮で保存されます。
 
-1. file header を読み、検証する。
-2. 各 entry length を読む。
-3. entry bounds と CRC32C を検証する。
-4. `VersionEntry` を再構築する。
-5. key ごとの sorted index に挿入する。
+公開される `VersionEntry` の value は常に展開済み bytes です。内部の compression flag は caller に返す前に取り除かれます。
 
-ファイルが壊れている場合、部分的な history view を返すのではなく open が失敗します。正しさの面では扱いやすい一方、履歴ファイルが壊れた場合の運用復旧には、別途 repair または restore 手順が必要です。
+## segment と sidecar
 
-### ロールバックエントリ
+base `logPath` が segment `0` です。後続 segment は拡張子の前に `-seg-N` を挿入します。
 
-ロールバック操作では `sourceNodeId = ROLLBACK_NODE` を使い、`VLOG_FLAG_ROLLBACK` を立てます。統計情報では `vlog.rollbackEntries` から確認できます。
+```text
+history.akvlog
+history-seg-1.akvlog
+history-seg-2.akvlog
+```
 
-ロールバックは新しい record を書いて状態を戻します。対象シーケンス時点でキーに値がなければ tombstone を書き、値があればその値を現在の状態として再書き込みします。
+各 segment は派生 `.akvidx` sidecar を持つことがあります。
 
-### Blob との関係
+```text
+history.akvidx
+history-seg-1.akvidx
+```
 
-VersionLog が有効な間、Blob GC は拒否されます。過去の履歴エントリが古い blob value を参照している可能性があり、それを削除すると過去時点読み取りが壊れるためです。
+sidecar は Bloom filter と、key fingerprint から `(seq, VLog byte offset)` record への sorted mapping を保存します。`history()` は Bloom filter で対象外 segment を飛ばし、該当 key の offset だけを読みます。`getAt()` は key ごとの sequence を二分探索し、選ばれた record を直接読みます。
 
-履歴と大きな値を同時に使う場合、履歴の保持期間や履歴コンパクションの方針が別途入るまでは、blob files も履歴から参照され続けるものとして扱います。
+`.akvlog` segment が authoritative です。`.akvidx` sidecar が欠損、古い、壊れている、または書けない場合は、安全に segment scan へ fall back します。recovery、rotation、clean close、retention-base 作成、保守ツールは sidecar の再生成を試みます。
 
-### サイズ見積もりとチューニング
+## active index memory
 
-VersionLog のコストは live key 数ではなく、保持している mutation 数にだいたい比例します。
+VersionLog は全履歴値をメモリに保持しません。閉じた segment は compact な segment metadata と sidecar index で表現します。mutable な active segment は key-to-offset metadata だけを持ち、`segmentBytes` で上限が付きます。
 
-| ワークロード | 主なコスト |
-|---|---|
-| 少数キーへの大量 update | キーごとの vector が大きくなり、`history(key)` の返却コストも増えます。 |
-| 多数キーで浅い履歴 | index map が大きくなり、startup replay で多くのキーを触ります。 |
-| 大きな inline value | `.akvlog` ファイルと queue bytes が大きくなります。 |
-| Blob-heavy value | 履歴 entry は小さくなりますが、古い blob files は参照され続けます。 |
+`segmentBytes = 0` の single-file mode では active metadata も無効化され、新しく append された log の読み取りは file scan に fall back します。これにより、履歴を無制限にメモリへ積み上げません。
 
-write-heavy workload では、まず `BATCHED_SYNC` から始め、`vlog.pendingBytes`、`vlog.asyncMaxPendingBytes`、write latency を見ます。pending bytes が高止まりする場合は、grouping window を短くする、flush しやすい配置にする、または本当に必要な箇所だけ同期を強くする方針が自然です。
+まだ disk に到達していない async write は、設定された visibility boundary で読めるように小さな resident overlay として保持されます。
 
-### 運用時に見る値
+## parallel lane storage
 
-VersionLog を有効にしたら、主に次の統計値を見ます。
+`PARALLEL` write admission は、安定した key fingerprint により各 key を lane に割り当てます。各 lane は active segment、queue、worker、active index、durable tail を所有します。異なる lane は並列に永続化でき、同じ key は同じ lane を通るため順序を保ちます。
 
-| フィールド | 見ること |
-|---|---|
-| `vlog.pendingBytes` | `vlog.asyncMaxPendingBytes` に近づく場合、履歴ログのフラッシュが詰まり気味です。 |
-| `vlog.indexedEntries` | 保持している履歴量の直接的な目安です。 |
-| `vlog.rollbackEntries` | ロールバック API を使った場合だけ増えるのが自然です。 |
-| `vlog.durableBytes` | 履歴ファイルへデータがフラッシュされているかを見る値です。 |
-| `vlog.flushThreadRunning` | `ASYNC` と `BATCHED_SYNC` では true になる想定です。 |
+`PARALLEL` mode は各 active lane segment の隣に `.akvtail` を書きます。tail は durable contiguous byte length を記録します。recovery はその prefix だけを scan し、それ以降の bytes を無視するため、中断された lane append が履歴として見えることはありません。
 
-### テストで確認している範囲
+## recovery
+
+recovery は segment file を発見し、file header、各 entry length、CRC32C を検証し、segment metadata を再構築し、sidecar を作り直し、最新 segment の active index を復元します。
+
+`EAGER` recovery は `open` が返る前に完了します。`BACKGROUND` recovery は active file を開いた後に返り、その後の VersionLog と `AkkEngine` operation は recovery barrier を待ってから engine state を観測または変更します。
+
+破損は受け入れません。recovery error には `VersionLog:` の文脈が含まれ、可能な場合は file path、entry offset、sequence number も含まれます。
+
+## retention
+
+retention は segment 単位で、デフォルトでは無効です。`retentionDays` と `retentionMinCommitSeq` は OR 条件です。閉じた segment は、age boundary に達するか、最大 sequence が sequence boundary より小さい場合に prune 候補になります。
+
+期限切れ segment を削除する前に、VersionLog は保持境界時点の最新値が消えてしまう key について synthetic `VLOG_FLAG_RETENTION_BASE` entry を書きます。これにより、保持 window 以降の `getAt()`、`history()`、rollback に必要な開始状態を残します。
+
+base boundary より前の問い合わせは利用できません。retention は active segment を削除せず、現在の commit frontier を越える segment も保持します。
+
+## Blob との関係
+
+VersionLog が有効な間、Blob GC は拒否されます。過去の履歴 entry が古い blob value を参照している可能性があり、それを削除すると過去時点読み取りが壊れるためです。VersionLog retention は履歴 segment を減らしますが、それだけでは blob が未参照になったとは判断できません。
+
+## rollback entry
+
+rollback 操作では `sourceNodeId = ROLLBACK_NODE` を使い、`VLOG_FLAG_ROLLBACK` を立てます。統計情報では `vlog.rollbackEntries` から確認できます。
+
+rollback は新しい record を書いて状態を戻します。対象シーケンス時点で key に値がなければ tombstone を書き、値があればその値を現在の状態として再書き込みします。
+
+## テストで確認している範囲
 
 現在の smoke test では、主に次を確認しています。
 
 | テスト内容 | 確認している挙動 |
 |---|---|
-| append and query | `append()`、`history()`、`getAt()`、snapshot counter。 |
-| recovery | `history.akvlog` を reopen して history を再構築できること。 |
-| corruption detection | header または entry corruption で open が throw すること。 |
-| rollback target collection | target sequence より新しい key が正しく選ばれること。 |
-| batched sync recovery | `BATCHED_SYNC` の entry が close / reopen 後も残ること。 |
-
-VersionLog 実装を変更する場合は、この挙動を baseline として見ます。
-
-### 制限
-
-現在の VersionLog は履歴を無期限に保持します。保持期間、履歴コンパクション、キー範囲ごとの削除、専用の履歴 GC はまだ提供していません。また、時刻ベースの lookup も公開していません。lookup cursor は sequence number です。長期運用データセットで有効化する場合は、ディスク使用量とメモリ使用量を見積もって使います。
+| admission and visibility | `COMMIT_ORDER`、`APPLIED`、serial admission、parallel admission、background recovery。 |
+| segment index fallback | `.akvidx` の欠損や破損で authoritative segment scan に fall back すること。 |
+| recovery corruption | CRC 破損や commit 済み entry の truncation で recovery が失敗すること。 |
+| parallel durable tail | `.akvtail` の durable prefix 以降を recovery が無視すること。 |
+| concurrent reads/writes | parallel writers/readers で sorted history と value が保たれること。 |
+| maintenance tool | `validate` と `rebuild-indexes` が派生 sidecar を再生成し、missing log を拒否すること。 |

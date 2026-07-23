@@ -133,10 +133,18 @@ Blob storage keeps large values out of MemTable and SST payloads. Do not combine
 | `vlog.groupMicros` | `500` | Max grouped flush delay. |
 | `vlog.groupBytes` | `1 MiB` | Max bytes per grouped flush. |
 | `vlog.asyncMaxPendingBytes` | `64 MiB` | Backpressure limit for pending version-log data. |
+| `vlog.writeAdmission` | `SERIAL` | Write admission mode: `SERIAL`, `PREPARE_PARALLEL`, or `PARALLEL`. |
+| `vlog.parallelWriteLanes` | `0` | Parallel writer lane count; `0` chooses a bounded hardware-derived value when `PARALLEL` is used. |
+| `vlog.recoveryMode` | `EAGER` | Recovery mode: `EAGER` or `BACKGROUND`. |
+| `vlog.codec` | `NONE` | VersionLog value codec: `NONE` or `ZSTD`. |
+| `vlog.zstdCompressionLevel` | `1` | Zstd level for new VersionLog records when `codec = ZSTD`. |
+| `vlog.segmentBytes` | `64 MiB` | Active segment rotation size; `0` disables rotation. |
+| `vlog.retentionDays` | `0` | Age boundary for pruning closed segments; `0` disables the age boundary. |
+| `vlog.retentionMinCommitSeq` | `0` | Commit-sequence boundary for pruning closed segments; `0` disables the sequence boundary. |
 
 Enable `components.versionLogEnabled` before relying on `history()`, `getAt()`, `rollbackKey()`, or `rollbackTo()`.
 
-For examples and rollback behavior, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/). For file format and operational notes, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/).
+For examples and rollback behavior, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/). For file format and recovery behavior, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/). For diagnostics and maintenance commands, see [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
 
 ## Manifest And Cluster Options
 

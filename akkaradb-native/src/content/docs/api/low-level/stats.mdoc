@@ -118,10 +118,23 @@ Compare `bytesUncompressed` and `bytesOnDisk` when compression is enabled. `gcCy
 | `vlog.pendingBytes` | Pending version-log bytes. |
 | `vlog.durableBytes` | Bytes durable in the version log. |
 | `vlog.flushThreadRunning` | Whether the async flush thread is running. |
+| `vlog.recoveryDurationMicros` | Last recovery duration in microseconds. |
+| `vlog.recoveredSegmentCount` | Segments scanned during the last recovery. |
+| `vlog.recoveredEntryCount` | Entries accepted during the last recovery. |
+| `vlog.segmentCount` | Current VersionLog segment count. |
+| `vlog.activeSegmentBytes` | Bytes in the active segment. |
+| `vlog.sidecarFallbackCount` | Sidecar misses or failures that fell back to segment scan. |
+| `vlog.sidecarRebuildFailures` | Failed attempts to rebuild derived sidecar indexes. |
+| `vlog.retentionPrunedSegments` | Closed segments deleted by retention. |
+| `vlog.retentionBaseEntriesWritten` | Synthetic base entries written before retention pruning. |
+| `vlog.parallelLaneCount` | Active parallel writer lane count. |
+| `vlog.parallelPendingWrites` | Pending writes across parallel lanes. |
+| `vlog.parallelPendingBytes` | Pending bytes across parallel lanes. |
+| `vlog.parallelQueueRejects` | Writes rejected because the pending queue budget was exhausted. |
 
-Use `pendingBytes` and `asyncMaxPendingBytes` to detect backpressure risk. `rollbackEntries` should be nonzero only when rollback APIs are used.
+Use `pendingBytes`, `parallelPendingBytes`, and `asyncMaxPendingBytes` to detect backpressure risk. `rollbackEntries` should be nonzero only when rollback APIs are used.
 
-For how these fields relate to the write path and file durability, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/).
+For how these fields relate to the write path and file durability, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/). For production interpretation and maintenance tooling, see [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
 
 ## API Stats
 
