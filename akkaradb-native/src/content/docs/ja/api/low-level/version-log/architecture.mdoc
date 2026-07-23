@@ -1,49 +1,49 @@
 ---
 title: VersionLog のアーキテクチャ
-description: VersionLog の保存形式、segment index、durable prefix 復旧、履歴保持の仕組みです。
+description: VersionLog の保存形式、セグメントインデックス、永続化済み範囲の復旧、履歴保持の仕組みです。
 ---
 
 このページは、VersionLog の内部構造を理解したい場合に読むページです。設定と API の使用例は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に分けています。本番運用の監視と保守コマンドは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
 
 ## 書き込み経路
 
-VersionLog が有効な場合、各エンジン mutation は live storage と同じ流れの中で記録されます。
+VersionLog が有効な場合、各エンジン変更は現在値の保存経路と同じ流れの中で記録されます。
 
 1. 新しいエンジンシーケンス番号を確保する。
 2. WAL が有効なら WAL に追加する。
-3. VersionLog entry を追加する。
-4. MemTable に mutation を反映する。
-5. `COMMIT_ORDER` visibility 用に VersionLog commit frontier を進める。
-6. cluster mode が有効ならレプリケーション実行層へ送る。
+3. VersionLog エントリを追加する。
+4. MemTable に変更を反映する。
+5. `COMMIT_ORDER` の可視性用に VersionLog のコミット済み範囲を進める。
+6. クラスターモードが有効ならレプリケーション実行層へ送る。
 
-`COMMIT_ORDER` の `history()` と `getAt()` は、対応するエンジン mutation より先に VersionLog entry を見せません。`APPLIED` は低 latency のために、append 済み履歴をより早く見せる option です。
+`COMMIT_ORDER` の `history()` と `getAt()` は、対応するエンジン変更より先に VersionLog エントリを見せません。`APPLIED` は低遅延のために、追加済み履歴をより早く見せるオプションです。
 
-## entry format
+## エントリ形式
 
-各 `.akvlog` segment は 32 byte の `AKV5` v1 header から始まります。entry は packed header、生 key bytes、stored value bytes、末尾 CRC32C を持ちます。
+各 `.akvlog` セグメントは 32 バイトの `AKV5` v1 ヘッダーから始まります。エントリは packed header、生キーのバイト列、保存値のバイト列、末尾 CRC32C を持ちます。
 
 | フィールド | 意味 |
 |---|---|
 | `seq` | エンジンのシーケンス番号です。 |
-| `sourceNodeId` | ローカルノード、レプリカ元ノード、または rollback sentinel です。 |
+| `sourceNodeId` | ローカルノード、レプリカ元ノード、またはロールバック用 sentinel です。 |
 | `timestampNs` | append 時刻です。 |
-| `flags` | compression、rollback、retention-base などの storage flag です。 |
+| `flags` | 圧縮、ロールバック、retention-base などの保存フラグです。 |
 | `keyFp64` | index 用の key fingerprint です。 |
-| `key` | 生の key bytes です。 |
-| `value` | raw value、compressed value payload、または blob reference bytes です。 |
-| `crc32c` | entry checksum です。 |
+| `key` | 生キーのバイト列です。 |
+| `value` | 生値、圧縮値ペイロード、または Blob 参照のバイト列です。 |
+| `crc32c` | エントリのチェックサムです。 |
 
-現在の entry size limit は 32 MiB です。`uint16_t` に収まらない key、`uint32_t` に収まらない value は serializer で拒否されます。
+現在のエントリサイズ上限は 32 MiB です。`uint16_t` に収まらないキー、`uint32_t` に収まらない値はシリアライザーで拒否されます。
 
 ## 圧縮
 
-`codec = ZSTD` の場合、VersionLog は各 value の圧縮を試みます。保存 value は 4 byte の非圧縮サイズと Zstd payload から始まります。圧縮 payload と prefix の合計が raw value より小さくない場合、その entry は非圧縮で保存されます。
+`codec = ZSTD` の場合、VersionLog は各値の圧縮を試みます。保存値は 4 バイトの非圧縮サイズと Zstd ペイロードから始まります。圧縮ペイロードと prefix の合計が生値より小さくない場合、そのエントリは非圧縮で保存されます。
 
-公開される `VersionEntry` の value は常に展開済み bytes です。内部の compression flag は caller に返す前に取り除かれます。
+公開される `VersionEntry` の値は常に展開済みバイト列です。内部の圧縮フラグは呼び出し元に返す前に取り除かれます。
 
-## segment と sidecar
+## セグメントとサイドカー
 
-base `logPath` が segment `0` です。後続 segment は拡張子の前に `-seg-N` を挿入します。
+基準 `logPath` がセグメント `0` です。後続セグメントは拡張子の前に `-seg-N` を挿入します。
 
 ```text
 history.akvlog
@@ -51,56 +51,56 @@ history-seg-1.akvlog
 history-seg-2.akvlog
 ```
 
-各 segment は派生 `.akvidx` sidecar を持つことがあります。
+各セグメントは派生 `.akvidx` サイドカーを持つことがあります。
 
 ```text
 history.akvidx
 history-seg-1.akvidx
 ```
 
-sidecar は Bloom filter と、key fingerprint から `(seq, VLog byte offset)` record への sorted mapping を保存します。`history()` は Bloom filter で対象外 segment を飛ばし、該当 key の offset だけを読みます。`getAt()` は key ごとの sequence を二分探索し、選ばれた record を直接読みます。
+サイドカーは Bloom filter と、key fingerprint から `(seq, VLog byte offset)` レコードへの sorted mapping を保存します。`history()` は Bloom filter で対象外セグメントを飛ばし、該当キーのオフセットだけを読みます。`getAt()` はキーごとのシーケンスを二分探索し、選ばれたレコードを直接読みます。
 
-`.akvlog` segment が authoritative です。`.akvidx` sidecar が欠損、古い、壊れている、または書けない場合は、安全に segment scan へ fall back します。recovery、rotation、clean close、retention-base 作成、保守ツールは sidecar の再生成を試みます。
+`.akvlog` セグメントが正本です。`.akvidx` サイドカーが欠損、古い、壊れている、または書けない場合は、安全にセグメント走査へフォールバックします。復旧、ローテーション、正常終了、retention-base 作成、保守ツールはサイドカーの再生成を試みます。
 
-## active index memory
+## アクティブインデックスのメモリ
 
-VersionLog は全履歴値をメモリに保持しません。閉じた segment は compact な segment metadata と sidecar index で表現します。mutable な active segment は key-to-offset metadata だけを持ち、`segmentBytes` で上限が付きます。
+VersionLog は全履歴値をメモリに保持しません。閉じたセグメントはコンパクトなセグメントメタデータとサイドカーインデックスで表現します。変更中のアクティブセグメントは key-to-offset メタデータだけを持ち、`segmentBytes` で上限が付きます。
 
-`segmentBytes = 0` の single-file mode では active metadata も無効化され、新しく append された log の読み取りは file scan に fall back します。これにより、履歴を無制限にメモリへ積み上げません。
+`segmentBytes = 0` の単一ファイルモードではアクティブメタデータも無効化され、新しく追加されたログの読み取りはファイル走査にフォールバックします。これにより、履歴を無制限にメモリへ積み上げません。
 
-まだ disk に到達していない async write は、設定された visibility boundary で読めるように小さな resident overlay として保持されます。
+まだディスクに到達していない非同期書き込みは、設定された可視性境界で読めるように小さな常駐オーバーレイとして保持されます。
 
-## parallel lane storage
+## 並列レーン保存
 
-`PARALLEL` write admission は、安定した key fingerprint により各 key を lane に割り当てます。各 lane は active segment、queue、worker、active index、durable tail を所有します。異なる lane は並列に永続化でき、同じ key は同じ lane を通るため順序を保ちます。
+`PARALLEL` 書き込み受付は、安定した key fingerprint により各キーをレーンに割り当てます。各レーンはアクティブセグメント、キュー、ワーカー、アクティブインデックス、永続化済み末尾を所有します。異なるレーンは並列に永続化でき、同じキーは同じレーンを通るため順序を保ちます。
 
-`PARALLEL` mode は各 active lane segment の隣に `.akvtail` を書きます。tail は durable contiguous byte length を記録します。recovery はその prefix だけを scan し、それ以降の bytes を無視するため、中断された lane append が履歴として見えることはありません。
+`PARALLEL` モードは各アクティブレーンセグメントの隣に `.akvtail` を書きます。tail は連続して永続化済みのバイト長を記録します。復旧処理はその prefix だけを走査し、それ以降のバイト列を無視するため、中断されたレーン追記が履歴として見えることはありません。
 
-## recovery
+## 復旧
 
-recovery は segment file を発見し、file header、各 entry length、CRC32C を検証し、segment metadata を再構築し、sidecar を作り直し、最新 segment の active index を復元します。
+復旧処理はセグメントファイルを発見し、ファイルヘッダー、各エントリ長、CRC32C を検証し、セグメントメタデータを再構築し、サイドカーを作り直し、最新セグメントのアクティブインデックスを復元します。
 
-`EAGER` recovery は `open` が返る前に完了します。`BACKGROUND` recovery は active file を開いた後に返り、その後の VersionLog と `AkkEngine` operation は recovery barrier を待ってから engine state を観測または変更します。
+`EAGER` 復旧は `open` が返る前に完了します。`BACKGROUND` 復旧はアクティブファイルを開いた後に返り、その後の VersionLog と `AkkEngine` 操作は復旧バリアを待ってからエンジン状態を観測または変更します。
 
-破損は受け入れません。recovery error には `VersionLog:` の文脈が含まれ、可能な場合は file path、entry offset、sequence number も含まれます。
+破損は受け入れません。復旧エラーには `VersionLog:` の文脈が含まれ、可能な場合はファイルパス、エントリオフセット、シーケンス番号も含まれます。
 
-## retention
+## 保持処理
 
-retention は segment 単位で、デフォルトでは無効です。`retentionDays` と `retentionMinCommitSeq` は OR 条件です。閉じた segment は、age boundary に達するか、最大 sequence が sequence boundary より小さい場合に prune 候補になります。
+保持処理はセグメント単位で、デフォルトでは無効です。`retentionDays` と `retentionMinCommitSeq` は OR 条件です。閉じたセグメントは、経過時間の境界に達するか、最大シーケンスがシーケンス境界より小さい場合に削除候補になります。
 
-期限切れ segment を削除する前に、VersionLog は保持境界時点の最新値が消えてしまう key について synthetic `VLOG_FLAG_RETENTION_BASE` entry を書きます。これにより、保持 window 以降の `getAt()`、`history()`、rollback に必要な開始状態を残します。
+期限切れセグメントを削除する前に、VersionLog は保持境界時点の最新値が消えてしまうキーについて合成 `VLOG_FLAG_RETENTION_BASE` エントリを書きます。これにより、保持範囲以降の `getAt()`、`history()`、ロールバックに必要な開始状態を残します。
 
-base boundary より前の問い合わせは利用できません。retention は active segment を削除せず、現在の commit frontier を越える segment も保持します。
+ベース境界より前の問い合わせは利用できません。保持処理はアクティブセグメントを削除せず、現在のコミット済み範囲を越えるセグメントも保持します。
 
 ## Blob との関係
 
-VersionLog が有効な間、Blob GC は拒否されます。過去の履歴 entry が古い blob value を参照している可能性があり、それを削除すると過去時点読み取りが壊れるためです。VersionLog retention は履歴 segment を減らしますが、それだけでは blob が未参照になったとは判断できません。
+VersionLog が有効な間、Blob GC は拒否されます。過去の履歴エントリが古い Blob 値を参照している可能性があり、それを削除すると過去時点読み取りが壊れるためです。VersionLog の保持処理は履歴セグメントを減らしますが、それだけでは Blob が未参照になったとは判断できません。
 
-## rollback entry
+## ロールバックエントリ
 
-rollback 操作では `sourceNodeId = ROLLBACK_NODE` を使い、`VLOG_FLAG_ROLLBACK` を立てます。統計情報では `vlog.rollbackEntries` から確認できます。
+ロールバック操作では `sourceNodeId = ROLLBACK_NODE` を使い、`VLOG_FLAG_ROLLBACK` を立てます。統計情報では `vlog.rollbackEntries` から確認できます。
 
-rollback は新しい record を書いて状態を戻します。対象シーケンス時点で key に値がなければ tombstone を書き、値があればその値を現在の状態として再書き込みします。
+ロールバックは新しいレコードを書いて状態を戻します。対象シーケンス時点でキーに値がなければ tombstone を書き、値があればその値を現在の状態として再書き込みします。
 
 ## テストで確認している範囲
 
@@ -108,9 +108,9 @@ rollback は新しい record を書いて状態を戻します。対象シーケ
 
 | テスト内容 | 確認している挙動 |
 |---|---|
-| admission and visibility | `COMMIT_ORDER`、`APPLIED`、serial admission、parallel admission、background recovery。 |
-| segment index fallback | `.akvidx` の欠損や破損で authoritative segment scan に fall back すること。 |
-| recovery corruption | CRC 破損や commit 済み entry の truncation で recovery が失敗すること。 |
-| parallel durable tail | `.akvtail` の durable prefix 以降を recovery が無視すること。 |
-| concurrent reads/writes | parallel writers/readers で sorted history と value が保たれること。 |
-| maintenance tool | `validate` と `rebuild-indexes` が派生 sidecar を再生成し、missing log を拒否すること。 |
+| 書き込み受付と可視性 | `COMMIT_ORDER`、`APPLIED`、直列受付、並列受付、バックグラウンド復旧。 |
+| セグメントインデックスのフォールバック | `.akvidx` の欠損や破損で、正本であるセグメント走査にフォールバックすること。 |
+| 復旧時の破損検出 | CRC 破損やコミット済みエントリの切り詰めで復旧が失敗すること。 |
+| 並列レーンの永続化済み末尾 | `.akvtail` の永続化済み範囲以降を復旧処理が無視すること。 |
+| 並行読み書き | 並列書き込み側/読み取り側でソート済み履歴と値が保たれること。 |
+| 保守ツール | `validate` と `rebuild-indexes` が派生サイドカーを再生成し、存在しないログを拒否すること。 |

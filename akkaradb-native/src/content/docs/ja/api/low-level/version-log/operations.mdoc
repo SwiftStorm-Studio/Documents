@@ -3,53 +3,53 @@ title: VersionLog の運用
 description: VersionLog の本番診断、保守ツール、運用確認項目です。
 ---
 
-このページは、VersionLog を有効にしたエンジンを本番運用する場合や、recovery、sidecar、retention、parallel queue の挙動を診断したい場合に読むページです。
+このページは、VersionLog を有効にしたエンジンを本番運用する場合や、復旧、サイドカー、保持処理、並列キューの挙動を診断したい場合に読むページです。
 
 ## 運用時に見る値
 
-VersionLog の health は主に `AkkEngine::stats().vlog` から確認します。stats は best-effort の診断 snapshot であり、transactionally consistent な読み取りではありません。
+VersionLog の状態は主に `AkkEngine::stats().vlog` から確認します。統計は best-effort の診断スナップショットであり、トランザクションとして一貫した読み取りではありません。
 
 | フィールド | 意味 | 対応 |
 |---|---|---|
-| `recoveryDurationMicros` | 直近 recovery pass の所要時間です。 | startup regression を追い、segment 数と entry 数と比較します。 |
-| `recoveredSegmentCount`, `recoveredEntryCount` | recovery が受け入れた segment と entry 数です。 | 予期しない減少は retention、durable-tail truncation、recovery failure を疑います。 |
-| `segmentCount`, `activeSegmentBytes` | 現在の segment 数と active segment size です。 | 履歴 storage が増えすぎる場合は `segmentBytes` と retention を調整します。 |
-| `sidecarFallbackCount` | `.akvidx` を使えず authoritative segment scan に fallback した query 数です。 | 増え続ける場合、正しさは保たれますが read が scan に劣化している可能性があります。 |
-| `sidecarRebuildFailures` | best-effort sidecar write が失敗した回数です。 | permission、disk full、antivirus/file lock、filesystem error を確認します。 |
-| `retentionPrunedSegments` | retention が削除できた closed segment 数です。 | retention が進んでいるかを見る値です。 |
-| `retentionBaseEntriesWritten` | prune 前に書いた synthetic base entry 数です。 | 値が大きい場合、多数の live key が retention boundary を跨いでいます。 |
-| `parallelLaneCount` | 有効な `PARALLEL` lane 数です。 | 解決後の lane count を確認します。 |
-| `parallelPendingWrites`, `parallelPendingBytes` | まだ永続化されていない lane work です。 | 高止まりする場合、storage が追いついていないか pending-byte limit が小さすぎます。 |
-| `parallelQueueRejects` | pending-byte limit により拒否された write 数です。 | 継続的に増える場合は alert 対象です。 |
+| `recoveryDurationMicros` | 直近の復旧処理の所要時間です。 | 起動時間の悪化を追い、セグメント数とエントリ数と比較します。 |
+| `recoveredSegmentCount`, `recoveredEntryCount` | 復旧処理が受け入れたセグメント数とエントリ数です。 | 予期しない減少は、保持処理、永続化済み末尾の切り詰め、復旧失敗を疑います。 |
+| `segmentCount`, `activeSegmentBytes` | 現在のセグメント数とアクティブセグメントのサイズです。 | 履歴ストレージが増えすぎる場合は `segmentBytes` と保持設定を調整します。 |
+| `sidecarFallbackCount` | `.akvidx` を使えず、正本であるセグメント走査にフォールバックした問い合わせ数です。 | 増え続ける場合、正しさは保たれますが読み取りが走査に劣化している可能性があります。 |
+| `sidecarRebuildFailures` | 可能な範囲で試みたサイドカー書き込みが失敗した回数です。 | 権限、ディスク容量不足、ウイルス対策ソフトやファイルロック、ファイルシステムエラーを確認します。 |
+| `retentionPrunedSegments` | 保持処理が削除できた閉じたセグメント数です。 | 保持処理が進んでいるかを見る値です。 |
+| `retentionBaseEntriesWritten` | 削除前に書いた合成ベースエントリ数です。 | 値が大きい場合、多数の有効キーが保持境界を跨いでいます。 |
+| `parallelLaneCount` | 有効な `PARALLEL` レーン数です。 | 解決後のレーン数を確認します。 |
+| `parallelPendingWrites`, `parallelPendingBytes` | まだ永続化されていないレーン上の作業量です。 | 高止まりする場合、ストレージが追いついていないか未処理バイト上限が小さすぎます。 |
+| `parallelQueueRejects` | 未処理バイト上限により拒否された書き込み数です。 | 継続的に増える場合はアラート対象です。 |
 
 ## 保守ツール
 
-`akkaradb_vlog_tool` executable は authoritative VersionLog segment を検証し、派生 sidecar index を再構築できます。
+`akkaradb_vlog_tool` 実行ファイルは、正本である VersionLog セグメントを検証し、派生サイドカーインデックスを再構築できます。
 
 ```text
 akkaradb_vlog_tool validate --log <path> [--json]
 akkaradb_vlog_tool rebuild-indexes --log <path> [--json]
 ```
 
-どちらの command も通常の eager recovery 経由で log を開きます。`.akvlog` segment を検証し、必要に応じて `.akvidx` sidecar を書き直します。base path も sibling segment も存在しない場合、新しい空 log は作らず失敗します。
+どちらのコマンドも通常の即時復旧経由でログを開きます。`.akvlog` セグメントを検証し、必要に応じて `.akvidx` サイドカーを書き直します。基準パスも兄弟セグメントも存在しない場合、新しい空ログは作らず失敗します。
 
-| exit code | 意味 |
+| 終了コード | 意味 |
 |---:|---|
-| `0` | recovery が完了しました。 |
-| `1` | validation/open に失敗しました。 |
-| `2` | `rebuild-indexes` で recovery は完了したが、sidecar regeneration failure がありました。 |
+| `0` | 復旧が完了しました。 |
+| `1` | 検証またはオープンに失敗しました。 |
+| `2` | `rebuild-indexes` で復旧は完了したが、サイドカー再生成の失敗がありました。 |
 
-supervisor や script で読む場合は `--json` を使います。
+監視プロセスやスクリプトで読む場合は `--json` を使います。
 
-## recovery failure の扱い
+## 復旧失敗の扱い
 
-recovery failure の `VersionLog:` error には file path が含まれ、可能な場合は byte offset と sequence number も含まれます。segment file が source of truth です。
+復旧失敗時の `VersionLog:` エラーにはファイルパスが含まれ、可能な場合はバイトオフセットとシーケンス番号も含まれます。セグメントファイルが正本です。
 
-データセットを意図的に破棄する、または backup から復元する場合を除き、`.akvlog` や `.akvtail` を削除しないでください。`.akvidx` sidecar は派生ファイルなので、削除や再生成が可能です。
+データセットを意図的に破棄する、またはバックアップから復元する場合を除き、`.akvlog` や `.akvtail` を削除しないでください。`.akvidx` サイドカーは派生ファイルなので、削除や再生成が可能です。
 
-## backup の考え方
+## バックアップの考え方
 
-filesystem-level backup では、VersionLog と engine の WAL、SST、Manifest、Blob を同じ時点の組として保存します。
+ファイルシステムレベルのバックアップでは、VersionLog とエンジンの WAL、SST、Manifest、Blob を同じ時点の組として保存します。
 
 ```text
 *.akvlog
@@ -60,4 +60,4 @@ manifest.akmf
 blobs/
 ```
 
-`.akvidx` sidecar は startup と read の高速化には有用ですが、source of truth ではなく再構築できます。
+`.akvidx` サイドカーは起動と読み取りの高速化には有用ですが、正本ではなく再構築できます。

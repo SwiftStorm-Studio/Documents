@@ -3,7 +3,7 @@ title: VersionLog の使い方
 description: バージョン履歴の有効化、過去時点読み取り、永続化設定、ロールバック操作の使い方です。
 ---
 
-このページは、VersionLog を有効にして、履歴取得、過去時点読み取り、ロールバック API を使いたい場合に読むページです。保存形式、復旧、sidecar、retention、運用上の制限は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) と [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) に分けています。
+このページは、VersionLog を有効にして、履歴取得、過去時点読み取り、ロールバック API を使いたい場合に読むページです。保存形式、復旧、サイドカー、保持処理、運用上の制限は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) と [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) に分けています。
 
 ## 履歴を有効にする
 
@@ -22,17 +22,17 @@ auto db = akkaradb::engine::AkkEngine::open(std::move(opts));
 
 ## 永続化モードを選ぶ
 
-VersionLog と WAL は別コンポーネントです。latest value の経路が durable でも、すべての履歴エントリが VersionLog 側の sync boundary を越えているとは限りません。
+VersionLog と WAL は別コンポーネントです。最新値の経路が永続化済みでも、すべての履歴エントリが VersionLog 側の同期境界を越えているとは限りません。
 
 | モード | 挙動 | 主な用途 |
 |---|---|---|
-| `SYNC` | 各 VersionLog entry を書き込み、永続化同期してから返ります。 | 履歴の永続性を最優先する場合。書き込みスループットは落ちます。 |
-| `ASYNC` | 読み取り可能な履歴は即時更新し、ファイルへの書き込みは background worker で行います。 | 小さな履歴永続化ウィンドウを許容してスループットを優先する場合。 |
-| `BATCHED_SYNC` | background worker で group 化し、batch 単位で永続化同期します。 | 1 書き込み 1 sync を避けつつ、履歴の永続性も重視する場合。 |
+| `SYNC` | 各 VersionLog エントリを書き込み、永続化同期してから返ります。 | 履歴の永続性を最優先する場合。書き込みスループットは落ちます。 |
+| `ASYNC` | 読み取り可能な履歴は即時更新し、ファイルへの書き込みはバックグラウンドワーカーで行います。 | 小さな履歴永続化ウィンドウを許容してスループットを優先する場合。 |
+| `BATCHED_SYNC` | バックグラウンドワーカーでまとめ、バッチ単位で永続化同期します。 | 1 書き込み 1 同期を避けつつ、履歴の永続性も重視する場合。 |
 
-`groupN`、`groupMicros`、`groupBytes` は非同期/batch flush の grouping 条件です。`asyncMaxPendingBytes` は未処理の履歴ログ bytes を制限し、必要に応じて書き込み側に backpressure をかけます。
+`groupN`、`groupMicros`、`groupBytes` は非同期/バッチフラッシュのまとめ条件です。`asyncMaxPendingBytes` は未処理の履歴ログバイト数を制限し、必要に応じて書き込み側にバックプレッシャーをかけます。
 
-直近の履歴を明示的な checkpoint として durable boundary まで進めたい場合は、`AkkEngine::forceSync()` を呼びます。
+直近の履歴を明示的なチェックポイントとして永続化境界まで進めたい場合は、`AkkEngine::forceSync()` を呼びます。
 
 ## 任意の圧縮
 
@@ -43,11 +43,11 @@ opts.vlog.codec = akkaradb::engine::vlog::VLogCodec::ZSTD;
 opts.vlog.zstdCompressionLevel = 1;
 ```
 
-圧縮 record は内部に元サイズを保持し、`VersionEntry` として返す前に展開されます。圧縮後 payload と size prefix の合計が raw value より小さい場合だけ圧縮保存されます。
+圧縮レコードは内部に元サイズを保持し、`VersionEntry` として返す前に展開されます。圧縮後ペイロードとサイズ prefix の合計が生値より小さい場合だけ圧縮保存されます。
 
 ## セグメント化と保持
 
-VersionLog はデフォルトで `segmentBytes = 64 MiB` の segmented storage を使います。古い履歴を閉じた segment から削除したい場合は retention boundary を設定します。
+VersionLog はデフォルトで `segmentBytes = 64 MiB` のセグメント化された保存形式を使います。古い履歴を閉じたセグメントから削除したい場合は保持境界を設定します。
 
 ```cpp
 opts.vlog.segmentBytes = 64ULL * 1024ULL * 1024ULL;
@@ -55,13 +55,13 @@ opts.vlog.retentionDays = 30;
 opts.vlog.retentionMinCommitSeq = 0;
 ```
 
-`retentionDays` と `retentionMinCommitSeq` は OR 条件です。どちらかの境界に達した閉じた segment が削除候補になります。削除前に、境界時点の状態が消えてしまう key について synthetic retention-base entry を書くため、保持された範囲以降の `getAt()`、`history()`、rollback は必要な開始状態を持てます。
+`retentionDays` と `retentionMinCommitSeq` は OR 条件です。どちらかの境界に達した閉じたセグメントが削除候補になります。削除前に、境界時点の状態が消えてしまうキーについて合成 retention-base エントリを書くため、保持された範囲以降の `getAt()`、`history()`、ロールバックは必要な開始状態を持てます。
 
-base boundary より前の問い合わせは利用できません。`history()` の最初の entry が `VLOG_FLAG_RETENTION_BASE` 付きの synthetic entry になることがあります。
+ベース境界より前の問い合わせは利用できません。`history()` の最初のエントリが `VLOG_FLAG_RETENTION_BASE` 付きの合成エントリになることがあります。
 
-## 並列 write admission
+## 並列書き込み受付
 
-write-heavy な local workload では、`PARALLEL` admission により独立した lane worker で VersionLog record を永続化できます。
+書き込みの多いローカルワークロードでは、`PARALLEL` 書き込み受付により、独立したレーンワーカーで VersionLog レコードを永続化できます。
 
 ```cpp
 opts.vlog.syncMode = akkaradb::engine::vlog::VLogSyncMode::ASYNC;
@@ -71,7 +71,7 @@ opts.vlog.parallelPendingLimitScope =
     akkaradb::engine::vlog::VLogParallelPendingLimitScope::GLOBAL;
 ```
 
-`PARALLEL` は `syncMode = ASYNC` を要求します。同じ key の書き込みは安定した key fingerprint により同じ lane に入り、順序を保ちます。`GLOBAL` は `asyncMaxPendingBytes` を全 lane 合計に適用し、`PER_LANE` は lane ごとに適用します。
+`PARALLEL` は `syncMode = ASYNC` を要求します。同じキーの書き込みは安定した key fingerprint により同じレーンに入り、順序を保ちます。`GLOBAL` は `asyncMaxPendingBytes` を全レーン合計に適用し、`PER_LANE` はレーンごとに適用します。
 
 ## キーの履歴を読む
 
@@ -97,13 +97,13 @@ for (const auto& entry : history) {
 
 | フィールド | 意味 |
 |---|---|
-| `seq` | mutation の単調増加するエンジンシーケンス番号です。`getAt()` や rollback API の入力に使います。 |
-| `sourceNodeId` | mutation の発生元です。ローカル書き込み、replica 適用、rollback write を区別できます。 |
-| `timestampNs` | エンジンが記録した append 時刻です。診断には使えますが、履歴の順序は `seq` が基準です。 |
-| `flags` | storage flag です。rollback entry と retention-base entry もここで判別できます。 |
-| `value` | 公開される value bytes です。圧縮 record は返却前に展開されます。 |
+| `seq` | 変更ごとに単調増加するエンジンシーケンス番号です。`getAt()` やロールバック API の入力に使います。 |
+| `sourceNodeId` | 変更の発生元です。ローカル書き込み、replica 適用、ロールバック書き込みを区別できます。 |
+| `timestampNs` | エンジンが記録した追加時刻です。診断には使えますが、履歴の順序は `seq` が基準です。 |
+| `flags` | 保存フラグです。ロールバックエントリと retention-base エントリもここで判別できます。 |
+| `value` | 公開される値のバイト列です。圧縮レコードは返却前に展開されます。 |
 
-安定した履歴カーソルとして扱うべきなのは `seq` です。wall-clock time はメタデータで、`getAt()` の解決には使われません。
+安定した履歴カーソルとして扱うべきなのは `seq` です。壁時計時刻はメタデータで、`getAt()` の解決には使われません。
 
 ## 指定シーケンス時点で読む
 
@@ -121,7 +121,7 @@ if (previous) {
 }
 ```
 
-該当する履歴 entry が tombstone の場合、`getAt()` は `std::nullopt` を返します。VersionLog が無効な場合も `std::nullopt` です。
+該当する履歴エントリが tombstone の場合、`getAt()` は `std::nullopt` を返します。VersionLog が無効な場合も `std::nullopt` です。
 
 ## API の挙動
 
@@ -132,11 +132,11 @@ if (previous) {
 | `rollbackKey(key, seq)` | throw | 古い値がなければ tombstone を書く | throw |
 | `rollbackTo(seq)` | throw | すでに対象シーケンス以前の key は対象外 | throw |
 
-rollback API は書き込み API です。新しいシーケンス番号を確保し、WAL と VersionLog に record を追加し、MemTable を更新し、Cluster が有効ならレプリケーション実行層にも送ります。
+ロールバック API は書き込み API です。新しいシーケンス番号を確保し、WAL と VersionLog にレコードを追加し、MemTable を更新し、Cluster が有効ならレプリケーション実行層にも送ります。
 
 ## 1 つのキーを戻す
 
-`rollbackKey(key, targetSeq)` は、指定 key を `targetSeq` 時点の状態へ戻す新しい record を書き込みます。
+`rollbackKey(key, targetSeq)` は、指定キーを `targetSeq` 時点の状態へ戻す新しいレコードを書き込みます。
 
 ```cpp
 auto history = db->history(bytes("profile:1"));
@@ -145,19 +145,19 @@ if (!history.empty()) {
 }
 ```
 
-rollback は履歴ファイルの破壊的な書き換えではありません。新しいエンジン mutation を追加し、その VersionLog entry に rollback flag を付け、過去の履歴は残します。
+ロールバックは履歴ファイルの破壊的な書き換えではありません。新しいエンジン変更を追加し、その VersionLog エントリにロールバックフラグを付け、過去の履歴は残します。
 
 ## 変更されたキーをまとめて戻す
 
-`rollbackTo(targetSeq)` は VersionLog の履歴を走査し、最新バージョンが `targetSeq` より新しい key をすべて戻します。
+`rollbackTo(targetSeq)` は VersionLog の履歴を走査し、最新バージョンが `targetSeq` より新しいキーをすべて戻します。
 
 ```cpp
 db->rollbackTo(checkpointSeq);
 ```
 
-この操作は慎重に扱います。対象 key ごとに新しい書き込みが発生し、cluster mode ではそれらの rollback write がレプリケーション実行層にも送られます。
+この操作は慎重に扱います。対象キーごとに新しい書き込みが発生し、クラスターモードではそれらのロールバック書き込みがレプリケーション実行層にも送られます。
 
-## sync と close
+## 同期と終了
 
 `AkkEngine::forceSync()` は、WAL と VersionLog が有効な場合に両方を同期します。
 
@@ -166,4 +166,4 @@ db->forceSync();
 db->close();
 ```
 
-`close()` は VersionLog worker を止め、ファイルを flush し、必要なら派生 sidecar を書き、非同期書き込みで発生していたエラーがあれば表面化させます。
+`close()` は VersionLog ワーカーを止め、ファイルをフラッシュし、必要なら派生サイドカーを書き、非同期書き込みで発生していたエラーがあれば表面化させます。
