@@ -144,7 +144,7 @@ Blob storage keeps large values out of MemTable and SST payloads. Do not combine
 
 Enable `components.versionLogEnabled` before relying on `history()`, `getAt()`, `rollbackKey()`, or `rollbackTo()`.
 
-For examples and rollback behavior, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/). For file format and recovery behavior, see [VersionLog Architecture](/akkaradb-native/api/low-level/version-log/architecture/). For diagnostics and maintenance commands, see [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
+For examples and rollback behavior, see [VersionLog Usage](/akkaradb-native/api/low-level/version-log/usage/). For file format and recovery behavior, see [VersionLog Architecture](/akkaradb-native/api/low-level/architecture/version-log/). For diagnostics and maintenance commands, see [VersionLog Operations](/akkaradb-native/api/low-level/version-log/operations/).
 
 ## Manifest And Cluster Options
 
@@ -157,7 +157,7 @@ For examples and rollback behavior, see [VersionLog Usage](/akkaradb-native/api/
 
 Cluster support is intentionally separate from the local embedded path. Keep `components.clusterEnabled` disabled until node identity, membership, transport mode, and acknowledgement policy are explicit.
 
-For runtime role, replication mode, and startup examples, see [Cluster Usage](/akkaradb-native/api/low-level/cluster/usage/). For routing, replication flow, and wire format, see [Cluster Architecture](/akkaradb-native/api/low-level/cluster/architecture/).
+For runtime role, replication mode, and startup examples, see [Cluster Usage](/akkaradb-native/api/low-level/cluster/usage/). For routing, replication flow, and wire format, see [Cluster Architecture](/akkaradb-native/api/low-level/architecture/cluster/).
 
 ## API Server Options
 
@@ -223,7 +223,7 @@ TLS settings:
 
 The API server is useful when `AkkEngine` is acting as a local process boundary or embedded service. Library users that call `AkkEngine` directly can leave it disabled.
 
-For startup examples and HTTP endpoints, see [API Server Usage](/akkaradb-native/api/low-level/api-server/usage/). For TCP framing and transport internals, see [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/).
+For startup examples and HTTP endpoints, see [API Server Usage](/akkaradb-native/api/low-level/api-server/usage/). For TCP framing and transport internals, see [API Server Architecture](/akkaradb-native/api/low-level/architecture/api-server/).
 
 ## Suggested Presets
 

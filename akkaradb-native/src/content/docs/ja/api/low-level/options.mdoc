@@ -144,7 +144,7 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 
 `history()`、`getAt()`、`rollbackKey()`、`rollbackTo()` を使う場合は、エンジンを開く前に `components.versionLogEnabled` を有効化します。
 
-使い方とロールバックの挙動は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に、ファイル形式と recovery の挙動は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/version-log/architecture/) に分けています。診断と保守コマンドは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
+使い方とロールバックの挙動は [VersionLog の使い方](/akkaradb-native/ja/api/low-level/version-log/usage/) に、ファイル形式と recovery の挙動は [VersionLog のアーキテクチャ](/akkaradb-native/ja/api/low-level/architecture/version-log/) に分けています。診断と保守コマンドは [VersionLog の運用](/akkaradb-native/ja/api/low-level/version-log/operations/) を参照してください。
 
 ## Manifest とクラスタ
 
@@ -157,7 +157,7 @@ Blob は大きな値を MemTable や SST 本体から分離するための仕組
 
 クラスタ設定はローカル組み込み用途とは分けて考えます。ノード ID、メンバーシップ、通信方式、ACK ポリシーが明確になるまでは `components.clusterEnabled` は無効のままにしてください。
 
-実行時ロール、レプリケーションモード、起動例は、[Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。ルーティング、レプリケーションの流れ、通信形式は、[Cluster のアーキテクチャ](/akkaradb-native/ja/api/low-level/cluster/architecture/) に分けています。
+実行時ロール、レプリケーションモード、起動例は、[Cluster の使い方](/akkaradb-native/ja/api/low-level/cluster/usage/) に分けています。ルーティング、レプリケーションの流れ、通信形式は、[Cluster のアーキテクチャ](/akkaradb-native/ja/api/low-level/architecture/cluster/) に分けています。
 
 ## API サーバーオプション
 
@@ -223,7 +223,7 @@ TLS 設定:
 
 API サーバーは、`AkkEngine` をプロセス境界や組み込みサービスとして公開したい場合に使います。ライブラリとして直接 `AkkEngine` を呼ぶだけなら無効のままで問題ありません。
 
-起動例と HTTP エンドポイントは、[API サーバーの使い方](/akkaradb-native/ja/api/low-level/api-server/usage/) に分けています。TCP フレーミングと通信方式の内部構造は、[API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/) に分けています。
+起動例と HTTP エンドポイントは、[API サーバーの使い方](/akkaradb-native/ja/api/low-level/api-server/usage/) に分けています。TCP フレーミングと通信方式の内部構造は、[API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/architecture/api-server/) に分けています。
 
 ## 推奨プリセット
 

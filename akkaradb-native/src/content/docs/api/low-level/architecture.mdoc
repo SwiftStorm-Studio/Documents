@@ -1,0 +1,23 @@
+---
+title: Low-Level Architecture
+description: A map of the low-level AkkaraDB components and where to find their internal design details.
+---
+
+Use this page as the entry point for low-level architecture details. Component overview and usage pages stay with each component; this section collects the deeper internal design pages in one place.
+
+## Component Map
+
+| Component | Architecture focus |
+|---|---|
+| [AkkEngine](/akkaradb-native/api/low-level/architecture/akkengine/) | Write path, read path, storage components, lifetimes, and durability boundaries. |
+| [API Server](/akkaradb-native/api/low-level/architecture/api-server/) | Transport backends, framing, request limits, and server lifecycle. |
+| [Cluster](/akkaradb-native/api/low-level/architecture/cluster/) | Runtime roles, routing, replication frames, ACK behavior, and operational boundaries. |
+| [VersionLog](/akkaradb-native/api/low-level/architecture/version-log/) | History storage, segment indexes, recovery, retention, and Blob interaction. |
+
+## Reading Order
+
+Start with [AkkEngine Architecture](/akkaradb-native/api/low-level/architecture/akkengine/) when you want the storage path: WAL, MemTable, SST, Blob, VersionLog, and snapshots.
+
+Read [VersionLog Architecture](/akkaradb-native/api/low-level/architecture/version-log/) when you need point-in-time reads, history, rollback, retention, or MVCC boundaries.
+
+Read [API Server Architecture](/akkaradb-native/api/low-level/architecture/api-server/) or [Cluster Architecture](/akkaradb-native/api/low-level/architecture/cluster/) when the engine is exposed outside the process or replicated between nodes.

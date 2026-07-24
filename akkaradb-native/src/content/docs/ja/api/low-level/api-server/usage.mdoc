@@ -3,7 +3,7 @@ title: API サーバーの使い方
 description: AkkEngine API サーバーを有効化し、HTTP、TCP、gRPC から呼び出す方法。
 ---
 
-このページは、API サーバーを起動して別プロセスから `AkkEngine` を呼びたい場合に読むページです。通信方式の内部構造、フレーミング、制限値、寿命管理は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/) に分けています。
+このページは、API サーバーを起動して別プロセスから `AkkEngine` を呼びたい場合に読むページです。通信方式の内部構造、フレーミング、制限値、寿命管理は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/architecture/api-server/) に分けています。
 
 ## サーバーを有効にする
 
@@ -120,7 +120,7 @@ response の `status` は TCP の status enum と同じです。`0x00` は OK、
 
 `/v1/scan` と `/v1/history` は、`stream` が true と解釈される場合に chunked streaming へ切り替わります。空、`0`、`false`、`off`、`no` は false で、それ以外の空でない値は true です。
 
-呼び出し側が行を逐次処理でき、レスポンス全体を先にメモリへためる必要がない場合に向いています。wire format は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/api-server/architecture/#http-ストリーミング) に分けています。
+呼び出し側が行を逐次処理でき、レスポンス全体を先にメモリへためる必要がない場合に向いています。wire format は [API サーバーのアーキテクチャ](/akkaradb-native/ja/api/low-level/architecture/api-server/#http-ストリーミング) に分けています。
 
 ## TLS と公開範囲
 

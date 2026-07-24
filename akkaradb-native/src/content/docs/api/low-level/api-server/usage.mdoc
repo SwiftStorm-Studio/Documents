@@ -3,7 +3,7 @@ title: API Server Usage
 description: How to enable the AkkEngine API server and call it over HTTP, TCP, or gRPC.
 ---
 
-Use this page when you want to start the API server and call `AkkEngine` from another process. For internal transport layout, framing, limits, and server lifetime, see [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/).
+Use this page when you want to start the API server and call `AkkEngine` from another process. For internal transport layout, framing, limits, and server lifetime, see [API Server Architecture](/akkaradb-native/api/low-level/architecture/api-server/).
 
 ## Enable The Server
 
@@ -120,7 +120,7 @@ The response status values match the TCP status enum: `0x00` is OK, `0x01` is no
 
 `/v1/scan` and `/v1/history` switch to chunked streaming when `stream` is truthy. Empty, `0`, `false`, `off`, and `no` are false; other non-empty values are true.
 
-Use streaming when the client can process rows incrementally and does not need the whole response buffered before it starts work. The wire format is described in [API Server Architecture](/akkaradb-native/api/low-level/api-server/architecture/#http-streaming).
+Use streaming when the client can process rows incrementally and does not need the whole response buffered before it starts work. The wire format is described in [API Server Architecture](/akkaradb-native/api/low-level/architecture/api-server/#http-streaming).
 
 ## TLS And Exposure
 
