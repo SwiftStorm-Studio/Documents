@@ -1,68 +1,68 @@
 ---
 title: AkkEngine のアーキテクチャ
-description: AkkEngine が byte operation を WAL、MemTable、SST、Blob、VersionLog、scan に対応させる仕組み。
+description: AkkEngine がバイト単位の操作を WAL、MemTable、SST、Blob、VersionLog、走査に対応させる仕組み。
 ---
 
-`AkkEngine` は、高レベル table API、API サーバー、Cluster runtime、VersionLog の下にある storage core です。byte key と byte value を受け取り、sequence number を割り当て、有効化された storage components を協調させます。
+`AkkEngine` は、高レベルのテーブル API、API サーバー、Cluster 実行環境、VersionLog の下にあるストレージ中核です。バイト列のキーと値を受け取り、シーケンス番号を割り当て、有効化されたストレージ構成要素を協調させます。
 
 ## 実行時の構成
 
-| Part | Role |
+| 部品 | 役割 |
 |---|---|
-| Public API | `put`、`remove`、`get`、`scan`、`history`、`getAt`、rollback、stats、flush、sync、close。 |
-| WAL | 有効な場合、current-state mutation を永続化する write-ahead log。 |
-| MemTable | 最近の write と tombstone を保持する in-memory current-state index。 |
-| SST | flush 済み current-state data の sorted persistent files。 |
-| Blob | 設定 threshold を超える value の外部 storage。 |
-| VersionLog | 有効な場合、old values と rollback のための append-only history stream。 |
-| Manifest | storage files と recovery のための persistent metadata。 |
+| 公開 API | `put`、`remove`、`get`、`scan`、`history`、`getAt`、ロールバック、統計、flush、sync、close。 |
+| WAL | 有効な場合、現在状態の変更を永続化する先行書き込みログ。 |
+| MemTable | 最近の書き込みと tombstone を保持する、メモリ上の現在状態インデックス。 |
+| SST | flush 済みの現在状態データを保持する、ソート済みの永続ファイル。 |
+| Blob | 設定されたしきい値を超える値の外部ストレージ。 |
+| VersionLog | 有効な場合、古い値とロールバックのための追記専用履歴ストリーム。 |
+| Manifest | ストレージファイルと復旧のための永続メタデータ。 |
 
 ## 書き込み経路
 
-通常の `put(key, value)` は engine state を検証し、sequence number を割り当て、設定済み components を通じて durable state を記録し、current in-memory state を更新します。`remove(key)` も同じ経路を通りますが、value ではなく tombstone を書きます。
+通常の `put(key, value)` はエンジン状態を検証し、シーケンス番号を割り当て、設定済みの構成要素を通じて永続状態を記録し、メモリ上の現在状態を更新します。`remove(key)` も同じ経路を通りますが、値ではなく tombstone を書きます。
 
-WAL が有効な場合、current-state mutation は設定された sync mode に従って WAL に書かれます。VersionLog が有効な場合は、あとから key を検査または rollback できるように履歴 metadata も記録されます。大きな value は Blob storage に逃がされますが、見えている key は通常の key/value entry として振る舞います。
+WAL が有効な場合、現在状態の変更は設定された同期モードに従って WAL に書かれます。VersionLog が有効な場合は、あとからキーを検査またはロールバックできるように履歴メタデータも記録されます。大きな値は Blob ストレージに逃がされますが、公開されるキーは通常のキー/値エントリとして振る舞います。
 
 ## 読み取り経路
 
-read は current-state storage を確認します。最近の value は MemTable から返ることがあります。flush 済みの古い value は SST files から見つかることがあります。Blob-backed value は Blob metadata を解決してから logical value として返されます。
+読み取りは現在状態のストレージを確認します。最近の値は MemTable から返ることがあります。flush 済みの古い値は SST ファイルから見つかることがあります。Blob に退避された値は Blob メタデータを解決してから論理値として返されます。
 
-`get()` は owning vector を返します。`getInto()` は呼び出し側の storage を再利用します。`getIntoArena()` は `BufferArena` に紐づく view を返すため、local hot path には向きますが arena lifetime の外へ出してはいけません。
+`get()` は所有権を持つ vector を返します。`getInto()` は呼び出し側の保存領域を再利用します。`getIntoArena()` は `BufferArena` に紐づく view を返すため、局所的なホットパスには向きますが、arena の寿命の外へ出してはいけません。
 
 ## 走査経路
 
-`scan(arena, start, end)` は half-open byte range `[start, end)` を走査します。返される view は arena-backed で、arena が生きていて reset されていない間だけ有効です。
+`scan(arena, start, end)` は半開区間のバイト範囲 `[start, end)` を走査します。返される view は arena によって裏付けられており、arena が生きていて reset されていない間だけ有効です。
 
-engine は raw bytes を lexicographic order で sort するため、range behavior は呼び出し側の key encoding によって決まります。text prefix、sortable big-endian numeric key、fixed-width segment がよく使う設計です。
+エンジンは生のバイト列を辞書順にソートするため、範囲の挙動は呼び出し側のキーエンコードによって決まります。テキスト接頭辞、ソート可能なビッグエンディアン数値キー、固定幅セグメントがよく使われる設計です。
 
 ## 耐久性の境界
 
-durability は API 名だけで決まるものではなく、設定で決まります。
+耐久性は API 名だけで決まるものではなく、設定で決まります。
 
-| Control | Effect |
+| 制御 | 効果 |
 |---|---|
-| WAL sync mode | current-state mutation をどれだけ積極的に同期するか。 |
-| `forceFlush()` | MemTable state を SST storage 側へ進めます。 |
-| `forceSync()` | WAL や VersionLog などの durable state を同期します。 |
-| `runtime.forceFlushOnClose` | close 時の flush behavior。 |
-| `runtime.forceSyncOnClose` | close 時の sync behavior。 |
+| WAL 同期モード | 現在状態の変更をどれだけ積極的に同期するか。 |
+| `forceFlush()` | MemTable の状態を SST ストレージ側へ進めます。 |
+| `forceSync()` | WAL や VersionLog などの永続状態を同期します。 |
+| `runtime.forceFlushOnClose` | close 時の flush 挙動。 |
+| `runtime.forceSyncOnClose` | close 時の sync 挙動。 |
 
-処理を次に進める前に明確な persistence boundary が必要な場合は、`DURABLE` 相当の設定や明示的な sync call を使います。
+処理を次に進める前に明確な永続化境界が必要な場合は、`DURABLE` 相当の設定や明示的な sync 呼び出しを使います。
 
 ## VersionLog の境界
 
-VersionLog は engine component です。`history(key)`、`getAt(key, seq)`、`rollbackKey(key, seq)`、`rollbackTo(seq)` は byte key と engine sequence number に対して動きます。
+VersionLog はエンジン構成要素です。`history(key)`、`getAt(key, seq)`、`rollbackKey(key, seq)`、`rollbackTo(seq)` はバイト列のキーとエンジンのシーケンス番号に対して動きます。
 
-`rollbackKey()` は 1 つの key だけに影響します。`rollbackTo()` は engine state を sequence まで戻すため、運用上の影響範囲が大きい操作です。Blob GC は、古い version が blob-backed value を参照している可能性があるため、VersionLog 有効時には intentionally incompatible です。
+`rollbackKey()` は 1 つのキーだけに影響します。`rollbackTo()` はエンジン状態を指定シーケンスまで戻すため、運用上の影響範囲が大きい操作です。Blob GC は、古いバージョンが Blob に退避された値を参照している可能性があるため、VersionLog 有効時には意図的に併用不可です。
 
 ## 所有権の境界
 
-`AkkEngine` は schema や typed entity を理解しません。保存するのは bytes です。呼び出し側が次を所有します。
+`AkkEngine` はスキーマや型付きエンティティを理解しません。保存するのはバイト列です。呼び出し側が次を所有します。
 
-- key layout と prefix rules
-- value encoding
-- schema compatibility
-- cross-key invariants
-- returned buffers の request/thread ownership
+- キー配置と接頭辞ルール
+- 値のエンコード
+- スキーマ互換性
+- キーをまたぐ不変条件
+- 返されたバッファのリクエスト単位またはスレッド単位の所有権
 
-高レベル API はこの層の上に typed struct encoding と table metadata を追加しますが、最終的には `AkkEngine` に byte key と byte value を書きます。
+高レベル API はこの層の上に型付き構造体のエンコードとテーブルメタデータを追加しますが、最終的には `AkkEngine` にバイト列のキーと値を書きます。
