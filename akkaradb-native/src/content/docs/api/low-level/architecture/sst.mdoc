@@ -1,0 +1,125 @@
+---
+title: SST Architecture
+description: How SST stores flushed current-state records, serves lookups and scans, compacts levels, and works with Manifest and VersionLog.
+---
+
+Use this page when you need the internal shape of the SST layer. Applications normally reach SST through `AkkEngine`; direct `SSTWriter`, `SSTReader`, and `SSTManager` usage is an engine-internal concern.
+
+## Role
+
+SST is the persistent sorted-table layer for flushed current-state data. MemTable owns recent mutable writes. SST owns immutable files created from flushed MemTables and compacted SST inputs.
+
+SST is not the durable history layer. Reads pass a snapshot sequence as a visibility upper bound over records that remain in the current SST set, but compaction may collapse older same-key records. Persistent historical reads, `history()`, `getAt()`, and rollback are VersionLog responsibilities.
+
+## Runtime Parts
+
+| Part | Responsibility |
+|---|---|
+| `SSTManager` | Owns the live level layout, flush lifecycle, lookup/scan fan-out, recovery, compaction scheduling, and stats. |
+| `SSTWriter` | Writes one immutable SST file from sorted records. |
+| `SSTReader` | Opens one SST file, validates metadata, serves point lookups and scans, and caches decoded blocks. |
+| Manifest | Records SST seal, delete, blob-reference, compaction, and checkpoint state for recovery. |
+
+`AkkEngine` wires these parts together. Flush workers pass immutable MemTable records into `SSTManager::flush()`, while reads consult SST only after MemTable misses.
+
+## File Shape
+
+SST files use the v2 `AKS2` format. Each file is immutable after it is written and sealed.
+
+```text
+[SSTFileHeaderV2:256]
+{ [SSTBlockHeaderV2:64][block payload][record offsets] }*
+[SSTBlockIndexEntryV2]*
+[key arena]
+[SSTBloomHeaderV2][bloom bits]
+[SSTFooterV2:48]
+```
+
+Records inside data blocks use `SSTHdr32` followed by key bytes and stored value bytes. Record flags distinguish normal values, tombstones, and Blob references.
+
+Blocks may use prefix compression for keys and Zstd compression for block payloads. The writer keeps raw blocks when compression does not reduce the payload.
+
+## Integrity
+
+The reader validates the file header, footer, declared byte ranges, block index, key arena, Bloom data, and CRC32C metadata before accepting a file. A corrupt or missing SST referenced by Manifest fails recovery rather than being interpreted as valid data.
+
+Each block carries its own CRC over the encoded payload and record-offset table. Decoded blocks are validated before they enter the block cache.
+
+## Lookup Path
+
+Point lookup starts at `SSTManager`, which searches the current published level snapshot. Readers skip files whose key range cannot contain the requested key. Within a candidate file, `SSTReader` uses:
+
+| Step | Purpose |
+|---|---|
+| Key range | Reject files outside `[firstKey, lastKey]`. |
+| Bloom filter | Reject negative lookups without reading a data block. |
+| Block index | Locate the candidate block by key boundaries and fingerprints. |
+| Block search | Binary-search records inside the decoded block. |
+| Snapshot check | Ignore records whose sequence is above the caller's snapshot upper bound. |
+
+A tombstone is returned as a real record so `AkkEngine` can stop searching older SST state and report the key as missing.
+
+## Scan Path
+
+`SSTManager::scanIter()` opens iterators over the current SST set and merges them by key. Newer records win over older records for the same key, and tombstones suppress older values.
+
+Scans use the same half-open range convention as `AkkEngine`: `[startKey, endKey)`. The snapshot sequence is applied as a visibility upper bound for retained SST records.
+
+## Flush Lifecycle
+
+Flush creates a level-0 SST:
+
+1. `SSTManager::flush()` receives sorted immutable MemTable records.
+2. `SSTWriter` writes a temporary file under `sstDir`.
+3. The temporary file is durably renamed to the final SST path.
+4. The new file is reopened through `SSTReader`.
+5. Manifest records blob references, the SST seal event, and the flush checkpoint when Manifest is enabled.
+6. The live level snapshot is published for readers.
+7. Compaction is requested when the level layout exceeds configured thresholds.
+
+The temporary-file and rename flow keeps partially written files out of the live SST set.
+
+## Compaction
+
+Compaction moves records from a source level into the next level. It merges selected input files, keeps the newest retained record for each key, and writes one or more output SST files bounded by `targetFileSize`.
+
+When compaction reaches the last configured level, tombstones can be dropped because no older level exists below them. For other levels, tombstones remain available to suppress older records.
+
+Manifest records compaction start and commit when available. After commit, `SSTManager` publishes the new level layout and removes compacted input files. Background compaction failures are recorded in stats and are rethrown through engine operation boundaries.
+
+## Recovery
+
+During recovery, `SSTManager` rebuilds the level layout from Manifest when Manifest is available. It opens and validates every referenced SST file. Files present in `sstDir` but not live in Manifest are treated as orphans.
+
+Without Manifest, recovery falls back to discovering SST files in `sstDir` and reading their embedded level and sequence metadata.
+
+## Options And Stats
+
+Important SST options are exposed through `AkkEngineOptions`:
+
+| Option | Meaning |
+|---|---|
+| `paths.sstDir` | Directory for SST files. |
+| `sst.maxLevels` | Number of levels in the sorted-table layout. |
+| `sst.maxL0Files` | Level-0 backlog threshold that triggers compaction pressure. |
+| `sst.targetFileSize` | Target size for flush and compaction output. |
+| `sst.blockSize` | Target size for data blocks. |
+| `sst.bloomBitsPerKey` | Bloom filter density for negative lookup rejection. |
+| `sst.blockCacheBytes` | Decoded block cache budget. |
+| `sst.compactionMode` | `AUTO`, `BACKGROUND`, or `DISABLED`. |
+| `sst.compactThreads` | Background compaction worker count. |
+| `sst.codec` | Block codec, usually `ZSTD`. |
+| `sst.zstdCompressionLevel` | Zstd level for newly written blocks. |
+
+`AkkEngine::stats()` exposes SST level counts, bytes, compaction counters, pending compaction state, and background compaction failures.
+
+## Boundaries
+
+Keep these constraints explicit:
+
+- SST stores the current-state set retained by flush and compaction.
+- SST snapshot filtering is an upper bound over retained records, not a durable historical-read guarantee.
+- VersionLog owns persistent history, point-in-time reads, and rollback.
+- Manifest owns durable SST lifecycle state when enabled.
+- Blob-backed SST records still require Blob storage to materialize the logical value.
+- Direct SST APIs are engine internals; application-facing reads and writes should go through `AkkEngine`.

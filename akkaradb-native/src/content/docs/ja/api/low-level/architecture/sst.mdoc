@@ -1,0 +1,125 @@
+---
+title: SST のアーキテクチャ
+description: SST が flush 済みの現在状態レコードを保存し、検索、走査、compaction、Manifest、VersionLog とどう関わるか。
+---
+
+このページは、SST 層の内部構造を理解したい場合に読むページです。アプリケーションは通常 `AkkEngine` 経由で SST に到達します。`SSTWriter`、`SSTReader`、`SSTManager` を直接使う前提の使い方ページではありません。
+
+## 役割
+
+SST は、flush 済みの現在状態データを保持する、ソート済みの永続テーブル層です。MemTable は最近の変更可能な書き込みを持ち、SST は MemTable flush や SST compaction から作られた不変ファイルを持ちます。
+
+SST は永続履歴の層ではありません。読み取り時には snapshot シーケンスを、現在の SST 集合に残っているレコードへの可視性上限として使います。ただし compaction は同じキーの古いレコードを潰すことがあります。永続的な過去時点読み取り、`history()`、`getAt()`、rollback は VersionLog の責務です。
+
+## 実行時の部品
+
+| 部品 | 役割 |
+|---|---|
+| `SSTManager` | 生きているレベル構成、flush の流れ、検索/走査の振り分け、復旧、compaction のスケジュール、統計を管理します。 |
+| `SSTWriter` | ソート済みレコードから 1 つの不変 SST ファイルを書きます。 |
+| `SSTReader` | 1 つの SST ファイルを開き、メタデータを検証し、単一キー検索と scan を処理し、展開済みブロックをキャッシュします。 |
+| Manifest | SST seal、削除、Blob 参照、compaction、checkpoint の状態を復旧用に記録します。 |
+
+`AkkEngine` はこれらの部品を結びます。flush worker は不変化された MemTable レコードを `SSTManager::flush()` に渡し、読み取りは MemTable で見つからなかった場合にだけ SST を確認します。
+
+## ファイル構造
+
+SST ファイルは v2 の `AKS2` 形式を使います。各ファイルは書き込みと seal が終わった後は不変です。
+
+```text
+[SSTFileHeaderV2:256]
+{ [SSTBlockHeaderV2:64][block payload][record offsets] }*
+[SSTBlockIndexEntryV2]*
+[key arena]
+[SSTBloomHeaderV2][bloom bits]
+[SSTFooterV2:48]
+```
+
+データブロック内のレコードは、`SSTHdr32`、キーのバイト列、保存値のバイト列で構成されます。レコードフラグで、通常値、tombstone、Blob 参照を区別します。
+
+ブロックはキーの prefix 圧縮と Zstd によるブロックペイロード圧縮を使えます。圧縮しても小さくならない場合、書き込み側は未圧縮ブロックのまま保存します。
+
+## 整合性検証
+
+読み取り側はファイルを受け入れる前に、ファイルヘッダー、フッター、宣言されたバイト範囲、key arena、Bloom data、ブロックインデックス、CRC32C メタデータを検証します。Manifest が参照する SST が壊れている、または存在しない場合、復旧はそのファイルを正しいデータとして扱わず失敗します。
+
+各ブロックは、エンコード済みペイロードとレコードオフセット表に対する CRC を持ちます。展開済みブロックは、ブロックキャッシュに入る前に検証されます。
+
+## 検索経路
+
+単一キー検索は `SSTManager` から始まり、現在公開されているレベル snapshot を検索します。読み取り側は、対象キーを含み得ないキー範囲のファイルを読み飛ばします。候補ファイルの中では、`SSTReader` が次を使います。
+
+| 手順 | 目的 |
+|---|---|
+| キー範囲 | `[firstKey, lastKey]` の外にあるファイルを除外します。 |
+| Bloom filter | データブロックを読まずに、存在しない可能性が高い検索を除外します。 |
+| ブロックインデックス | キー境界とフィンガープリントから候補ブロックを探します。 |
+| ブロック内検索 | 展開済みブロック内のレコードを二分探索します。 |
+| snapshot 確認 | 呼び出し側の snapshot 上限より新しいシーケンスのレコードを無視します。 |
+
+tombstone は実レコードとして返されます。これにより、`AkkEngine` はそれより古い SST 状態の検索を止め、キーが存在しないものとして扱えます。
+
+## 走査経路
+
+`SSTManager::scanIter()` は、現在の SST 集合に対する iterator を開き、キー順に merge します。同じキーでは新しいレコードが古いレコードより優先され、tombstone は古い値を抑止します。
+
+scan は `AkkEngine` と同じ半開区間 `[startKey, endKey)` を使います。snapshot シーケンスは、保持されている SST レコードに対する可視性上限として適用されます。
+
+## Flush の流れ
+
+flush は level 0 の SST を作ります。
+
+1. `SSTManager::flush()` がソート済みの不変 MemTable レコードを受け取る。
+2. `SSTWriter` が `sstDir` の下に一時ファイルを書く。
+3. 一時ファイルを最終 SST パスへ durable rename する。
+4. 新しいファイルを `SSTReader` で開き直す。
+5. Manifest が有効な場合、Blob 参照、SST seal、flush checkpoint を記録する。
+6. 読み取り側へ新しいレベル snapshot を公開する。
+7. レベル構成がしきい値を超えた場合、compaction を要求する。
+
+一時ファイルと rename の流れにより、書きかけのファイルは生きている SST 集合に入りません。
+
+## Compaction
+
+compaction は、ある元レベルのレコードを次のレベルへ移します。選ばれた入力ファイルを merge し、各キーについて保持対象の最新レコードを残し、`targetFileSize` を目安に 1 つ以上の出力 SST ファイルを書きます。
+
+最後の設定レベルに到達した compaction では、それより下に古いレベルが存在しないため tombstone を削除できます。それ以外のレベルでは、古いレコードを抑止するため tombstone を残します。
+
+Manifest がある場合、compaction start と commit を記録します。commit 後、`SSTManager` は新しいレベル構成を公開し、compaction 済みの入力ファイルを削除します。background compaction の失敗は統計に記録され、エンジン操作の境界で再送出されます。
+
+## 復旧
+
+復旧時、`SSTManager` は Manifest が使える場合、Manifest からレベル構成を再構築します。参照されている SST ファイルをすべて開いて検証します。`sstDir` に存在しても Manifest 上で生きている扱いではないファイルは orphan として扱います。
+
+Manifest がない場合は、`sstDir` 内の SST ファイルを発見し、ファイルに埋め込まれたレベルとシーケンスメタデータから復旧します。
+
+## オプションと統計
+
+主要な SST オプションは `AkkEngineOptions` から設定されます。
+
+| オプション | 意味 |
+|---|---|
+| `paths.sstDir` | SST ファイルを置くディレクトリ。 |
+| `sst.maxLevels` | ソート済みテーブル構成のレベル数。 |
+| `sst.maxL0Files` | compaction 圧力を発生させる level 0 のファイル数しきい値。 |
+| `sst.targetFileSize` | flush と compaction の出力目標サイズ。 |
+| `sst.blockSize` | データブロックの目標サイズ。 |
+| `sst.bloomBitsPerKey` | 存在しない可能性が高い検索を除外する Bloom filter の密度。 |
+| `sst.blockCacheBytes` | 展開済みブロックキャッシュの容量。 |
+| `sst.compactionMode` | `AUTO`、`BACKGROUND`、`DISABLED`。 |
+| `sst.compactThreads` | バックグラウンド compaction worker の数。 |
+| `sst.codec` | ブロック codec。通常は `ZSTD`。 |
+| `sst.zstdCompressionLevel` | 新しく書くブロックの Zstd レベル。 |
+
+`AkkEngine::stats()` は、SST のレベルごとのファイル数とバイト数、compaction カウンター、pending compaction 状態、background compaction の失敗数を公開します。
+
+## 境界
+
+次の境界を明示しておく必要があります。
+
+- SST は flush と compaction で保持される現在状態集合を保存します。
+- SST の snapshot filtering は保持済みレコードに対する上限であり、永続的な履歴読み取り保証ではありません。
+- 永続履歴、過去時点読み取り、rollback は VersionLog の責務です。
+- Manifest が有効な場合、SST のライフサイクル状態は Manifest が永続化します。
+- Blob 参照を持つ SST レコードを論理値として返すには、対応する Blob ストレージが必要です。
+- 直接の SST API はエンジン内部向けです。アプリケーション向けの読み書きは `AkkEngine` を経由してください。

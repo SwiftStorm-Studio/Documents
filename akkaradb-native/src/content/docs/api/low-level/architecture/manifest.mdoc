@@ -1,0 +1,86 @@
+---
+title: Manifest Architecture
+description: How Manifest records durable lifecycle metadata for SST, checkpoints, Blob references, and Cluster breadcrumbs.
+---
+
+Use this page when you need the internal shape of the Manifest layer. Applications normally reach Manifest through `AkkEngine`; direct Manifest writes are a storage-engine concern.
+
+## Role
+
+Manifest is a durable append-only metadata log. It records storage lifecycle events that recovery needs in order to rebuild the engine's view of live SST files, deleted SST files, checkpoints, Blob state, and selected Cluster breadcrumbs.
+
+Manifest does not store key/value records. WAL stores recent write-ahead data, SST stores flushed current-state records, Blob stores externalized large values, and VersionLog stores durable history. Manifest records which storage artifacts are valid and how they should be interpreted during recovery.
+
+## Runtime Responsibilities
+
+| Area | What Manifest records |
+|---|---|
+| SST lifecycle | SST seal events, deleted SST files, and atomic compaction commits. |
+| Checkpoints | The latest named checkpoint with stripe and sequence metadata. |
+| Blob lifecycle | Blob put/delete events and per-SST Blob reference sets. |
+| Cluster breadcrumbs | Node join/leave records and primary lease records. |
+| Replay state | Rebuilt live/deleted SST sets, checkpoint state, Blob sets, and recorded Cluster events. |
+
+All public Manifest methods are thread-safe. Engine code can append lifecycle records from flush, compaction, checkpoint, Blob, and Cluster paths without exposing Manifest as an application API.
+
+## File Shape
+
+Manifest files use the `AMV5` format. A base manifest can be accompanied by rotated manifest files; compaction rewrites the replayed state into a fresh base file and removes old rotated history.
+
+```text
+[ManifestFileHeader:32]
+{ [ManifestRecordHeader:8][payload] }*
+```
+
+The file header contains the magic, version, record count, and header CRC. Each record header contains the record type, flags, payload length, and CRC32C of the payload.
+
+The record type determines how the payload is decoded. SST records, checkpoint records, compaction records, Blob records, and Cluster records share the same framing but have different payload layouts.
+
+## Durability Modes
+
+Manifest has two write modes:
+
+| Mode | Behavior |
+|---|---|
+| Synchronous mode | With `fastMode == false`, each append is followed by a file sync. This gives the strongest Manifest durability boundary. |
+| Fast mode | With `fastMode == true`, a background flusher batches writes and syncs periodically. This lowers write latency but relaxes the durability boundary for the most recent Manifest records. |
+
+Closing Manifest drains pending fast-mode writes before the file is closed.
+
+## SST Lifecycle
+
+`sstSeal()` records that an SST file has become part of the live set. During replay, the sealed file is treated as live and is removed from the deleted set.
+
+`sstDelete()` records removal of a file from the live set. It is kept for older paths, but compaction should prefer `compactionCommit()` so input removal and output publication happen as one record.
+
+`compactionCommit()` is the important recovery boundary for compaction. It records the output SST files and input SST files in a single CRC-protected record. During replay, outputs become live and inputs become deleted as one logical step. If a crash happens before that commit is durable, recovery keeps the pre-compaction SST state and leaves uncommitted output files outside the live set.
+
+## Checkpoints
+
+`checkpoint()` records a named checkpoint with stripe and sequence metadata. Replay exposes the latest checkpoint so recovery can align durable storage state with WAL and engine recovery boundaries.
+
+Checkpoint application also keeps Manifest state compact: deleted SST tracking is cleared, and remembered SST seal metadata is pruned down to the files that are still live.
+
+## Blob And Cluster Records
+
+Blob records let Manifest track external Blob files and the relationship between SST files and Blob-backed values. `blobPut()` and `blobDelete()` record Blob lifecycle events. `sstBlobRefs()` records the Blob IDs referenced by one SST file, and replay rebuilds the per-SST reference map.
+
+Cluster records are durable breadcrumbs, not a consensus protocol. `nodeJoin()`, `nodeLeave()`, and `primaryLease()` preserve observed Cluster lifecycle events, but Cluster runtime behavior still belongs to the Cluster layer.
+
+## Replay And Compaction
+
+Replay reads Manifest records in order, validates framing and CRC metadata, decodes each payload, and applies valid records to an in-memory state model. The reconstructed state is then used by storage recovery to determine live SST files, deleted SST files, the latest checkpoint, Blob state, and recorded Cluster events.
+
+`compact()` rewrites the replayed state into a fresh Manifest file. The rewritten file preserves the current live state and drops historical records that are no longer needed for recovery.
+
+## Boundaries
+
+Keep these constraints explicit:
+
+- Manifest is recovery metadata, not a key/value data store.
+- Manifest does not replace WAL durability for recent writes.
+- Manifest does not provide VersionLog history, `getAt()`, `history()`, or rollback.
+- Manifest makes SST lifecycle changes durable when enabled.
+- Compaction output becomes live only after the Manifest compaction commit is durable.
+- Fast mode intentionally trades the strongest per-record durability boundary for lower write latency.
+- Cluster records in Manifest are lifecycle breadcrumbs, not distributed consensus state.

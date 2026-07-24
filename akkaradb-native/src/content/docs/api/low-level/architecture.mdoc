@@ -10,6 +10,8 @@ Use this page as the entry point for low-level architecture details. Component o
 | Component | Architecture focus |
 |---|---|
 | [AkkEngine](/akkaradb-native/api/low-level/architecture/akkengine/) | Write path, read path, storage components, lifetimes, and durability boundaries. |
+| [SST](/akkaradb-native/api/low-level/architecture/sst/) | Sorted-table files, lookup and scan paths, flush, compaction, recovery, and Manifest boundaries. |
+| [Manifest](/akkaradb-native/api/low-level/architecture/manifest/) | Append-only lifecycle metadata, SST state, checkpoints, Blob references, cluster breadcrumbs, and recovery. |
 | [API Server](/akkaradb-native/api/low-level/architecture/api-server/) | Transport backends, framing, request limits, and server lifecycle. |
 | [Cluster](/akkaradb-native/api/low-level/architecture/cluster/) | Runtime roles, routing, replication frames, ACK behavior, and operational boundaries. |
 | [VersionLog](/akkaradb-native/api/low-level/architecture/version-log/) | History storage, segment indexes, recovery, retention, and Blob interaction. |
@@ -17,6 +19,10 @@ Use this page as the entry point for low-level architecture details. Component o
 ## Reading Order
 
 Start with [AkkEngine Architecture](/akkaradb-native/api/low-level/architecture/akkengine/) when you want the storage path: WAL, MemTable, SST, Blob, VersionLog, and snapshots.
+
+Read [SST Architecture](/akkaradb-native/api/low-level/architecture/sst/) when you need the persistent sorted-table layout, flush and compaction behavior, or the boundary between current-state SST data and VersionLog history.
+
+Read [Manifest Architecture](/akkaradb-native/api/low-level/architecture/manifest/) when you need to understand how recovery finds live SST files, how compaction commits become durable, or how checkpoint, Blob, and Cluster metadata are recorded.
 
 Read [VersionLog Architecture](/akkaradb-native/api/low-level/architecture/version-log/) when you need point-in-time reads, history, rollback, retention, or MVCC boundaries.
 

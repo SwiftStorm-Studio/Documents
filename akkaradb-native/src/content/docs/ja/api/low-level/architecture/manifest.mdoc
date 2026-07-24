@@ -1,0 +1,86 @@
+---
+title: Manifest のアーキテクチャ
+description: Manifest が SST、checkpoint、Blob 参照、Cluster の記録に関する永続ライフサイクルメタデータをどう持つか。
+---
+
+このページは、Manifest 層の内部構造を理解したい場合に読むページです。アプリケーションは通常 `AkkEngine` 経由で Manifest に到達します。Manifest への直接書き込みは、ストレージエンジン内部の関心事です。
+
+## 役割
+
+Manifest は、永続的な追記型メタデータログです。復旧時に必要なストレージのライフサイクルイベントを記録し、生きている SST ファイル、削除済み SST ファイル、checkpoint、Blob 状態、一部の Cluster 記録を再構築できるようにします。
+
+Manifest は key/value レコードを保存しません。WAL は直近の先行書き込みデータ、SST は flush 済みの現在状態レコード、Blob は外部化された大きい値、VersionLog は永続履歴を持ちます。Manifest は、それらの保存物のうち何を有効として扱うか、復旧時にどう解釈するかを記録します。
+
+## 実行時の責務
+
+| 領域 | Manifest が記録するもの |
+|---|---|
+| SST のライフサイクル | SST seal、削除済み SST、atomic な compaction commit。 |
+| checkpoint | 最新の名前付き checkpoint、stripe、シーケンスメタデータ。 |
+| Blob のライフサイクル | Blob put/delete と SST ごとの Blob 参照集合。 |
+| Cluster の記録 | node join/leave と primary lease の記録。 |
+| replay 状態 | 再構築された生存/削除済み SST 集合、checkpoint 状態、Blob 集合、Cluster 記録。 |
+
+Manifest の public メソッドはすべてスレッドセーフです。エンジン内部は、flush、compaction、checkpoint、Blob、Cluster の経路からライフサイクル記録を追記できますが、Manifest 自体をアプリケーション API として公開する前提ではありません。
+
+## ファイル構造
+
+Manifest ファイルは `AMV5` 形式を使います。基本の Manifest ファイルに加えて、ローテーションされた Manifest ファイルが存在することがあります。compaction は replay 済みの状態を新しい基本ファイルへ書き直し、古いローテーション履歴を削除します。
+
+```text
+[ManifestFileHeader:32]
+{ [ManifestRecordHeader:8][payload] }*
+```
+
+ファイルヘッダーには magic、version、レコード数、ヘッダー CRC が入ります。各レコードヘッダーにはレコード種別、フラグ、ペイロード長、ペイロードに対する CRC32C が入ります。
+
+ペイロードの読み方はレコード種別で決まります。SST、checkpoint、compaction、Blob、Cluster の各レコードは同じフレーミングを共有しますが、ペイロードの中身はそれぞれ異なります。
+
+## 耐久性モード
+
+Manifest には 2 つの書き込みモードがあります。
+
+| モード | 挙動 |
+|---|---|
+| 同期モード | `fastMode == false` の場合、追記ごとにファイル同期を行います。Manifest として最も強い耐久性境界になります。 |
+| fast mode | `fastMode == true` の場合、background flusher が書き込みをまとめて定期的に同期します。書き込み遅延は小さくなりますが、直近の Manifest レコードの耐久性境界は緩くなります。 |
+
+Manifest を閉じるときは、fast mode で保留されている書き込みを排出してからファイルを閉じます。
+
+## SST のライフサイクル
+
+`sstSeal()` は、SST ファイルが生きている集合に入ったことを記録します。replay 時には、その seal 済みファイルを生きている扱いにし、削除済み集合からは外します。
+
+`sstDelete()` は、ファイルが生きている集合から外れたことを記録します。古い経路のために残っていますが、compaction では入力削除と出力公開を 1 つのレコードで扱える `compactionCommit()` を優先します。
+
+`compactionCommit()` は、compaction における重要な復旧境界です。出力 SST ファイルと入力 SST ファイルを、CRC で保護された 1 つのレコードに記録します。replay 時には、出力を生きている扱いにし、入力を削除済み扱いにする処理を 1 つの論理ステップとして適用します。commit が永続化される前にクラッシュした場合、復旧は compaction 前の SST 状態を維持し、未 commit の出力ファイルを生きている集合には入れません。
+
+## Checkpoint
+
+`checkpoint()` は、名前付き checkpoint と stripe、シーケンスメタデータを記録します。replay 後には最新の checkpoint を参照できるため、復旧処理は永続ストレージ状態を WAL やエンジンの復旧境界と合わせられます。
+
+checkpoint の適用は Manifest 状態の肥大化も抑えます。削除済み SST の追跡を消し、記憶している SST seal メタデータを、現在も生きているファイルだけに絞ります。
+
+## Blob と Cluster の記録
+
+Blob レコードにより、Manifest は外部 Blob ファイルと、SST ファイル内の Blob 参照との関係を追跡できます。`blobPut()` と `blobDelete()` は Blob のライフサイクルイベントを記録します。`sstBlobRefs()` は 1 つの SST ファイルが参照する Blob ID を記録し、replay は SST ごとの参照マップを再構築します。
+
+Cluster レコードは永続的な記録であり、合意プロトコルそのものではありません。`nodeJoin()`、`nodeLeave()`、`primaryLease()` は観測された Cluster のライフサイクルイベントを残しますが、Cluster の実行時挙動は Cluster 層の責務です。
+
+## Replay と Compaction
+
+replay は Manifest レコードを順番に読み、フレーミングと CRC メタデータを検証し、各ペイロードを読み解いて、インメモリの状態モデルへ適用します。再構築された状態は、ストレージ復旧時に生きている SST ファイル、削除済み SST ファイル、最新 checkpoint、Blob 状態、Cluster 記録を判断するために使われます。
+
+`compact()` は replay 済みの状態を新しい Manifest ファイルへ書き直します。書き直されたファイルは現在の生存状態を保持し、復旧に不要になった過去のレコードを落とします。
+
+## 境界
+
+次の境界を明示しておく必要があります。
+
+- Manifest は復旧用メタデータであり、key/value データストアではありません。
+- Manifest は直近書き込みに対する WAL の耐久性を置き換えません。
+- Manifest は VersionLog の履歴、`getAt()`、`history()`、rollback を提供しません。
+- Manifest が有効な場合、SST のライフサイクル変更は Manifest によって永続化されます。
+- compaction の出力は、Manifest の compaction commit が永続化されてから生きている扱いになります。
+- fast mode は、書き込み遅延を小さくする代わりに、レコードごとの最も強い耐久性境界を意図的に緩めます。
+- Manifest 内の Cluster 記録はライフサイクルの記録であり、分散合意の状態ではありません。

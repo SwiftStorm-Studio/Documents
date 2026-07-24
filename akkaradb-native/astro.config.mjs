@@ -103,6 +103,8 @@ export default defineConfig({
 									items: [
 										{ label: 'Overview', translations: { ja: '概要' }, slug: 'api/low-level/architecture' },
 										{ label: 'AkkEngine', slug: 'api/low-level/architecture/akkengine' },
+										{ label: 'SST', translations: { ja: 'SST' }, slug: 'api/low-level/architecture/sst' },
+										{ label: 'Manifest', translations: { ja: 'Manifest' }, slug: 'api/low-level/architecture/manifest' },
 										{ label: 'API Server', translations: { ja: 'API サーバー' }, slug: 'api/low-level/architecture/api-server' },
 										{ label: 'Cluster', translations: { ja: 'Cluster' }, slug: 'api/low-level/architecture/cluster' },
 										{ label: 'VersionLog', translations: { ja: 'VersionLog' }, slug: 'api/low-level/architecture/version-log' },
