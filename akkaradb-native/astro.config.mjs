@@ -12,6 +12,7 @@ export default defineConfig({
 		markdoc(),
 		starlight({
 			title: 'AkkaraDB Native',
+			favicon: '/favicon.png',
 			customCss: ['./src/styles/oled.css'],
 			components: {
 				Header: './src/components/Header.astro',
