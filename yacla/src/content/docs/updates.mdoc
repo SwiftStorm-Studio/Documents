@@ -1,0 +1,68 @@
+---
+title: Config Updates
+description: Version checks, recursive merging, safe file replacement, and update strategy selection.
+---
+
+## Enable updates
+
+Use `autoUpdate = true` with a shortcut, or `autoUpdateIfOutdated(true)` with a builder. Automatic updates run before object construction, so new required fields can be supplied by the default resource.
+
+Include a root `version` in both documents. YAML finds it case-insensitively; JSON uses the exact key `version`. If a version is absent, the built-in strategies use `1.0.0` for comparison.
+
+Versions are compared as dot-separated integer segments. Missing segments are zero; non-integer segments become zero. Use plain numeric versions such as `1.2.0`, not prerelease suffixes requiring full SemVer semantics.
+
+## Merge behavior
+
+Suppose the current file is:
+
+```yaml
+version: "1.0.0"
+server:
+  port: 9000
+custom: true
+```
+
+The bundled default becomes:
+
+```yaml
+version: "1.1.0"
+server:
+  port: 8080
+  host: localhost
+```
+
+After updating:
+
+```yaml
+version: "1.1.0"
+server:
+  port: 9000
+  host: localhost
+custom: true
+```
+
+Mappings merge recursively; existing user values and extra keys survive. Lists and scalar values keep the user's value rather than merging individual elements. Only the root version is replaced; nested `version` fields are ordinary user values. Merge key matching is case-sensitive, except for the root YAML version handling.
+
+The YAML strategy uses comment-aware parsing and dumping. Updates can reformat a document; byte-for-byte formatting is not preserved. Output is serialized to a temporary file beside the target, then replaced atomically where supported, with a regular replacement fallback.
+
+## Manual updates
+
+```kotlin
+if (loader.updateConfig()) {
+    loader.reload()
+}
+```
+
+Manual updates check the version too. Equal or newer current versions do not trigger a merge. Adding resource fields without increasing its version does not update an existing file.
+
+## Strategy selection
+
+Each parser supplies its default strategy. A builder's `updateStrategy(...)` takes precedence over shared settings and the parser default.
+
+| Setting | Effect |
+| --- | --- |
+| `autoUpdateIfOutdated(false)` | Disables the initial automatic check; manual updates remain available |
+| Builder `updateStrategy(null)` | Disables automatic and manual updates for that loader |
+| Shared `LoaderSettings(updateStrategy = null, ...)` | Uses the selected parser's default strategy |
+
+Built-in parsers supply a fresh strategy when requested; the loader retains its selected strategy for manual updates. There is no global strategy registry.

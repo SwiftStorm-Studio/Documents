@@ -1,0 +1,54 @@
+---
+title: Annotations
+description: Map, validate, transform, and warn about constructor fields.
+---
+
+Annotations are in `net.ririfa.yacla.annotation`. Apply them to primary constructor parameters.
+
+| Annotation | Behavior |
+| --- | --- |
+| `@Key("name")` | Prefers the supplied document key |
+| `@Range(min, max)` | Checks inclusive numeric bounds when a value is present |
+| `@NotBlank` | Rejects present blank strings; null is not rejected by this annotation alone |
+| `@BlankToNull` | Turns blank strings into null |
+| `@SetOf` | Converts a collection to a set; an empty set becomes null |
+| `@EnumList` / `@EnumSet` | Supported markers; enum collections also convert without them |
+| `@Loader(MyLoader::class)` | Transforms a non-null raw value before built-in conversion |
+| `@Warn("message")` | Logs when the processed value is null, if a logger is configured |
+
+## Validate fields
+
+```kotlin
+import net.ririfa.yacla.annotation.NotBlank
+import net.ririfa.yacla.annotation.Range
+
+data class Credentials(
+    @NotBlank val token: String,
+    @Range(min = 1, max = 60) val timeoutSeconds: Int = 10
+)
+```
+
+`token` is required because its type is non-null and it has no default. `@NotBlank` rejects whitespace-only strings. For a nullable token, use nullability and defaults deliberately; `@NotBlank` alone does not make it required.
+
+Annotations validate supplied values during mapping. Omitted constructor defaults are not separately revalidated.
+
+## Custom field loader
+
+```kotlin
+import net.ririfa.yacla.annotation.Loader
+import net.ririfa.yacla.loader.FieldLoader
+
+class TrimLoader : FieldLoader {
+    override fun load(raw: Any?): Any? = raw?.toString()?.trim()
+}
+
+data class NamedConfig(
+    @Loader(TrimLoader::class) val name: String? = null
+)
+```
+
+Custom loaders must be constructible by Kotlin reflection, for example with a no-argument constructor. Missing or null raw values do not invoke the custom loader.
+
+## Processing order
+
+Yacla applies the custom loader, built-in conversion, `@BlankToNull`, `@NotBlank`, `@Range`, `@SetOf`, and finally `@Warn`. Constructor defaults and nullability are resolved afterward. A warning can therefore be emitted before a constructor default is selected.

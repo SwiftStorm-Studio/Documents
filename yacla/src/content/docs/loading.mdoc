@@ -1,0 +1,73 @@
+---
+title: Loading & Reloading
+description: Choose between direct loading, retained loaders, and the fluent builder.
+---
+
+## Direct objects and retained loaders
+
+`Yacla.yaml<T>()` and `Yacla.json<T>()` return `T`. Their `autoUpdate` argument defaults to `false` and their logger defaults to null.
+
+Keep a `ConfigLoader<T>` when your application needs to reload:
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.yamlLoader
+import java.nio.file.Paths
+
+val loader = Yacla.yamlLoader<AppConfig>(
+    resource = "/defaults/config.yml",
+    file = Paths.get("config.yml"),
+    autoUpdate = true
+)
+
+val initialConfig = loader.config
+loader.reload()
+val refreshedConfig = loader.config
+```
+
+`reload()` reads the backing file and replaces the loader's current config snapshot. Previously retrieved objects still refer to the old snapshot. Reloading does not itself perform an update check.
+
+## Builder
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/config.yml")
+    .toFile(Paths.get("config.yml"))
+    .parser(YamlParser())
+    .autoUpdateIfOutdated(true)
+    .load()
+```
+
+For ordinary loading, set a resource, a target file, and a parser before `load()`. Use `pull(...)` instead of `toFile(...)` for [localized defaults](/yacla/localization/).
+
+The format-specific DSL preselects its parser:
+
+```kotlin
+val loader = Yacla.yamlLoader<AppConfig> {
+    fromResource("/defaults/config.yml")
+    toFile(Paths.get("config.yml"))
+    autoUpdateIfOutdated(true)
+}
+```
+
+## Lifecycle reference
+
+| Member | Behavior |
+| --- | --- |
+| `config` | Returns the current in-memory config |
+| `reload()` | Parses and validates the file again; returns the loader |
+| `updateConfig()` | Checks and merges the resource; returns whether the file changed |
+
+After a successful manual update, call `reload()` to read the updated file. There is no automatic file watcher.
+
+## Constructor defaults without I/O
+
+```kotlin
+val defaults = Yacla.fillByDefault<AppConfig>()
+```
+
+This directly invokes the Kotlin primary constructor with no arguments. Every constructor parameter must have a default value. It performs no file access, parsing, or annotation validation.

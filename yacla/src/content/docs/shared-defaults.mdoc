@@ -1,0 +1,61 @@
+---
+title: Shared Defaults & Java
+description: Share parser, logging, update, and language defaults and call the builder from Java.
+---
+
+## Shared settings
+
+```kotlin
+import net.ririfa.yacla.LoaderSettings
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.Yacla.loader
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val settings = LoaderSettings(parser = YamlParser(), autoUpdate = true)
+
+val config = Yacla.withDefaults(settings) {
+    loader<AppConfig> {
+        fromResource("/defaults/config.yml")
+        toFile(Paths.get("config.yml"))
+    }.config
+}
+```
+
+The scope applies defaults before the per-loader block. Override settings in that block when a config needs different behavior. Shared defaults are scoped to the block and do not mutate global state.
+
+| `LoaderSettings` property | Default |
+| --- | --- |
+| `parser` | Required |
+| `logger` | null |
+| `autoUpdate` | false |
+| `languageSettings` | JVM language, `en` fallback, single file |
+| `updateStrategy` | null, meaning the parser's default |
+
+`LanguageSettings` can provide shared language, fallback, output mode, and output languages. See [Localized Defaults](/yacla/localization/).
+
+## Logging
+
+Pass a `YaclaLogger` to `withLogger(...)`, shortcut `logger`, or shared settings. `net.ririfa.yacla.logger.impl.SLF4JYaclaLogger` is provided for applications with SLF4J on their runtime classpath. Yacla core declares SLF4J as compile-only; your application must supply the API and a logging provider when using this adapter.
+
+## Java entry point
+
+Use a Kotlin-defined `AppConfig` with a primary constructor, such as the class in [Getting Started](/yacla/getting-started/).
+
+```java
+import net.ririfa.yacla.Yacla;
+import net.ririfa.yacla.loader.ConfigLoader;
+import net.ririfa.yacla.yaml.YamlParser;
+import java.nio.file.Paths;
+
+ConfigLoader<AppConfig> loader = Yacla.loader(AppConfig.class)
+    .fromResource("/defaults/config.yml")
+    .toFile(Paths.get("config.yml"))
+    .parser(new YamlParser())
+    .autoUpdateIfOutdated(true)
+    .load();
+
+AppConfig config = loader.getConfig();
+```
+
+Java has a functional `Yacla.withDefaults(settings, scope -> ...)` overload. Inside that scope, `scope.loader(AppConfig.class, builder -> { ... })` builds and loads the config. Ordinary Java POJOs and records do not meet the current Kotlin-primary-constructor mapping contract.

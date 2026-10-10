@@ -23,7 +23,9 @@ function run(command, args) {
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
 
-run('npm', ['--prefix', 'akkaradb-native', 'ci']);
-run('npm', ['--prefix', 'akkaradb-native', 'run', 'build']);
+for (const project of ['akkaradb-native', 'yacla']) {
+  run('npm', ['--prefix', project, 'ci']);
+  run('npm', ['--prefix', project, 'run', 'build']);
+}
 
 await cp(publicDir, distDir, { recursive: true });

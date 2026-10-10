@@ -203,12 +203,20 @@
       </header>
 
       <section class="docs-grid" aria-label="Documentation projects" data-i18n-aria="projectsLabel">
-        <a class="doc-link" href="/akkaradb-native/" data-doc-link>
+        <a class="doc-link" href="/akkaradb-native/" data-doc-link="akkaraHref">
           <span data-i18n="akkaraTag">Storage Engine</span>
           <strong data-i18n="akkaraTitle">AkkaraDB Native</strong>
           <p data-i18n="akkaraDescription">
             C++ storage engine documentation covering the low-level key/value API and typed table
             API surface.
+          </p>
+        </a>
+        <a class="doc-link" href="/yacla/" data-doc-link="yaclaHref">
+          <span data-i18n="yaclaTag">Configuration Loader</span>
+          <strong>Yacla</strong>
+          <p data-i18n="yaclaDescription">
+            Type-safe YAML and JSON configuration loading for Kotlin, with validation,
+            resource defaults, updates, and localized output.
           </p>
         </a>
       </section>
@@ -228,6 +236,10 @@
           akkaraDescription:
             'C++ storage engine documentation covering the low-level key/value API and typed table API surface.',
           akkaraHref: '/akkaradb-native/',
+          yaclaTag: 'Configuration Loader',
+          yaclaDescription:
+            'Type-safe YAML and JSON configuration loading for Kotlin, with validation, resource defaults, updates, and localized output.',
+          yaclaHref: '/yacla/',
         },
         ja: {
           documentTitle: 'SwiftStorm Studio Docs',
@@ -241,6 +253,10 @@
           akkaraDescription:
             '低レベルのキー・バリュー API と typed table API を扱う、C++ ストレージエンジン向けドキュメントです。',
           akkaraHref: '/akkaradb-native/ja/',
+          yaclaTag: '設定ローダー',
+          yaclaDescription:
+            'Kotlin 向けの型安全な YAML・JSON 設定ローダー。検証、リソースからの初期設定、更新、多言語出力の使い方を紹介します。',
+          yaclaHref: '/yacla/ja/',
         },
       };
 
@@ -269,9 +285,8 @@
           element.setAttribute('aria-label', content[element.dataset.i18nAria]);
         }
 
-        const docLink = document.querySelector('[data-doc-link]');
-        if (docLink) {
-          docLink.href = content.akkaraHref;
+        for (const docLink of document.querySelectorAll('[data-doc-link]')) {
+          docLink.href = content[docLink.dataset.docLink];
         }
 
         for (const button of document.querySelectorAll('[data-lang-button]')) {

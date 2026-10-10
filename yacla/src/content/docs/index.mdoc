@@ -1,0 +1,33 @@
+---
+title: Yacla
+description: Type-safe YAML and JSON configuration loading for Kotlin and Java applications.
+---
+
+**Yet Another Config Loading API** — Yacla loads YAML or JSON documents into Kotlin classes using their primary constructors. This documentation covers **4.2.0**, matching the current source version.
+
+## What Yacla handles
+
+- Copies bundled defaults when the target file is missing.
+- Maps keys, nested objects, collections, enums, and Kotlin default values.
+- Validates fields through annotations and reports conversion errors with field paths.
+- Merges newer default documents while retaining user values.
+- Selects localized default resources using the JVM language or an explicit language.
+
+## Choose an entry point
+
+| API | Use it for |
+| --- | --- |
+| `Yacla.yaml<T>()` / `Yacla.json<T>()` | Loading a config object directly |
+| `yamlLoader<T>()` / `jsonLoader<T>()` | Keeping a loader for manual updates and reloads |
+| `Yacla.loader<T>()` | Selecting parsers, update strategies, and language settings |
+| `Yacla.withDefaults(...)` | Sharing defaults between several loaders |
+
+## Documentation map
+
+Start with [Getting Started](/yacla/getting-started/), then explore [mapping and validation](/yacla/mapping/), [config updates](/yacla/updates/), and [localized defaults](/yacla/localization/).
+
+Java 17 or newer is required. Config objects currently need Kotlin primary constructors; Java applications can use the Java-friendly builder with Kotlin-defined config classes. Java records are not currently supported.
+
+Yacla is distributed under the MIT license.
+
+[日本語の概要を読む](/yacla/ja/)

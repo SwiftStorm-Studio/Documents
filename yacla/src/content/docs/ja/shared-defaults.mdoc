@@ -1,0 +1,61 @@
+---
+title: 共通設定と Java
+description: パーサー、ログ、更新、言語の共通設定と Java からのビルダー呼び出し。
+---
+
+## 共通設定
+
+```kotlin
+import net.ririfa.yacla.LoaderSettings
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.Yacla.loader
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val settings = LoaderSettings(parser = YamlParser(), autoUpdate = true)
+
+val config = Yacla.withDefaults(settings) {
+    loader<AppConfig> {
+        fromResource("/defaults/config.yml")
+        toFile(Paths.get("config.yml"))
+    }.config
+}
+```
+
+ローダーごとのブロックより先に共通設定を適用します。異なる動作が必要なローダーは、そのブロック内で上書きできます。共通設定はブロックのスコープに閉じており、グローバルな状態を変更しません。
+
+| `LoaderSettings` のプロパティ | 初期値 |
+| --- | --- |
+| `parser` | 必須 |
+| `logger` | null |
+| `autoUpdate` | false |
+| `languageSettings` | JVM の言語、`en` フォールバック、単一ファイル |
+| `updateStrategy` | null。パーサーのデフォルト戦略を使う |
+
+`LanguageSettings` で言語、フォールバック、出力モード、出力言語を共通化できます。[多言語のデフォルト設定](/yacla/ja/localization/)を参照してください。
+
+## ログ
+
+`YaclaLogger` を `withLogger(...)`、ショートカットの `logger`、または共通設定に渡します。実行時に SLF4J を利用できるアプリケーションには `net.ririfa.yacla.logger.impl.SLF4JYaclaLogger` が用意されています。core は SLF4J を compile-only として宣言しているため、このアダプターを使う場合はアプリケーション側で API とログ出力の実装を用意してください。
+
+## Java から使う
+
+[はじめに](/yacla/ja/getting-started/)の例のように、プライマリコンストラクターを持つ `AppConfig` を Kotlin で定義して使います。
+
+```java
+import net.ririfa.yacla.Yacla;
+import net.ririfa.yacla.loader.ConfigLoader;
+import net.ririfa.yacla.yaml.YamlParser;
+import java.nio.file.Paths;
+
+ConfigLoader<AppConfig> loader = Yacla.loader(AppConfig.class)
+    .fromResource("/defaults/config.yml")
+    .toFile(Paths.get("config.yml"))
+    .parser(new YamlParser())
+    .autoUpdateIfOutdated(true)
+    .load();
+
+AppConfig config = loader.getConfig();
+```
+
+Java 向けに `Yacla.withDefaults(settings, scope -> ...)` があり、その中の `scope.loader(AppConfig.class, builder -> { ... })` でビルダーを設定して読み込めます。通常の Java POJO や records は、現在の Kotlin プライマリコンストラクターによるマッピングの契約を満たしません。

@@ -1,0 +1,93 @@
+---
+title: はじめに
+description: Yacla を導入して、最初の YAML・JSON 設定を読み込みます。
+---
+
+## インストール
+
+Java 17 以上を使用し、Yacla の各モジュールは同じバージョンに揃えてください。Gradle Kotlin DSL に core と必要な形式のモジュールを追加します。
+
+```kotlin
+repositories {
+    maven("https://repo.ririfa.net/maven2")
+}
+
+dependencies {
+    implementation("net.ririfa:yacla-core:4.2.0")
+    implementation("net.ririfa:yacla-yaml:4.2.0")
+    // JSON も使う場合に追加します。
+    implementation("net.ririfa:yacla-json:4.2.0")
+}
+```
+
+## 設定クラスを定義する
+
+```kotlin
+import net.ririfa.yacla.annotation.Key
+import net.ririfa.yacla.annotation.Range
+
+data class AppConfig(
+    val version: String = "1.0.0",
+    @Key("server-port")
+    @Range(min = 1, max = 65535)
+    val port: Int = 8080,
+    val debug: Boolean = false
+)
+```
+
+## デフォルトのリソースを同梱する
+
+アプリケーションに `src/main/resources/defaults/config.yml` を作成します。
+
+```yaml
+version: "1.0.0"
+server-port: 8080
+debug: false
+```
+
+この `version` はアプリケーションの設定スキーマのバージョンです。Yacla 本体のバージョンとは独立しています。
+
+## 読み込む
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.yaml
+import java.nio.file.Paths
+
+val config = Yacla.yaml<AppConfig>(
+    resource = "/defaults/config.yml",
+    file = Paths.get("config.yml"),
+    autoUpdate = true
+)
+
+println(config.port)
+```
+
+ファイルがない場合は、必要な親ディレクトリを作成して classpath のリソースをコピーします。初期コピーは既存のファイルを上書きしません。`autoUpdate = true` の場合、新しいリソースのバージョンを検出すると、設定オブジェクトの構築前にマージします。
+
+相対的なファイルパスはアプリケーションの作業ディレクトリ基準です。リソースのパスはディスク上のパスではなく classpath を指します。
+
+## JSON を使う
+
+`src/main/resources/defaults/config.json` を同梱します。
+
+```json
+{
+  "version": "1.0.0",
+  "server-port": 8080,
+  "debug": false
+}
+```
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.json.json
+import java.nio.file.Paths
+
+val config = Yacla.json<AppConfig>(
+    resource = "/defaults/config.json",
+    file = Paths.get("config.json")
+)
+```
+
+次は[読み込みと再読み込み](/yacla/ja/loading/)を参照してください。

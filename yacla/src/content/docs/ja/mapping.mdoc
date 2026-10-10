@@ -1,0 +1,53 @@
+---
+title: マッピングと検証
+description: キーの解決、ネストした型、デフォルト値、null、厳格な型変換のルール。
+---
+
+## キーの解決
+
+キーの大文字・小文字は区別しません。コンストラクターの引数ごとに、明示した `@Key`、引数名、snake_case、kebab-case の順で探します。`apiKey` の自動候補は `apikey`、`api_key`、`api-key` です。
+
+明示したキーを優先しますが、見つからない場合は自動候補も探します。設定クラスにないキーはコンストラクターに渡されず、ファイル内に残せます。
+
+## デフォルト値と null
+
+| 入力 | 結果 |
+| --- | --- |
+| Kotlin のデフォルト値がある項目の欠落 | コンストラクターのデフォルト値を使う |
+| デフォルト値のない nullable 項目の欠落 | null を使う |
+| 必須の non-null 項目の欠落 | `YaclaConfigException` |
+| nullable 項目への明示的な null | デフォルト値があっても null を保持 |
+| non-null 項目への明示的な null | デフォルト値があっても例外 |
+
+`@BlankToNull` と `@SetOf` は、null ではない入力から null を生成することがあります。その場合はコンストラクターのデフォルト値を選べます。
+
+## ネストした設定とコレクション
+
+```kotlin
+enum class Mode { DEVELOPMENT, PRODUCTION }
+
+data class ServerConfig(val host: String, val port: Int = 8080)
+
+data class AppConfig(
+    val servers: List<ServerConfig> = emptyList(),
+    val modes: Set<Mode> = emptySet(),
+    val limits: Map<String, Int> = emptyMap()
+)
+```
+
+```yaml
+servers:
+  - host: localhost
+    port: 8080
+modes: [development, production]
+limits:
+  requests: 100
+```
+
+List、Set、Map の要素は再帰的に変換します。ネストしたクラスにもプライマリコンストラクターが必要です。enum はコレクション内も大文字・小文字を区別せず、`@EnumList` と `@EnumSet` は省略できます。List または Set に単一の値を渡すと、1 要素として扱います。
+
+## 変換に失敗した場合
+
+不正な値は、デフォルト値への置換や要素の省略ではなく `YaclaConfigException` になります。整数への変換は小数値とオーバーフローを拒否し、Float・Double は非有限値を拒否します。Boolean は大文字・小文字を区別せず `true` と `false` を受け付けます。
+
+エラーには `servers[0].port` のようなコンストラクターのフィールドパスが含まれます。存在する値が不正な場合、デフォルト値があっても回避できません。設定ファイルを修正してから再読み込みしてください。

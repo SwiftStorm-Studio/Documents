@@ -1,0 +1,54 @@
+---
+title: アノテーション
+description: コンストラクターの項目のキー指定、検証、変換、警告。
+---
+
+アノテーションは `net.ririfa.yacla.annotation` にあります。プライマリコンストラクターの引数に指定します。
+
+| アノテーション | 動作 |
+| --- | --- |
+| `@Key("name")` | 指定した設定キーを優先する |
+| `@Range(min, max)` | 値がある場合、両端を含む数値範囲を検証する |
+| `@NotBlank` | 存在する空白文字列を拒否する。この指定単独では null を拒否しない |
+| `@BlankToNull` | 空白文字列を null にする |
+| `@SetOf` | コレクションを Set にし、空の Set は null にする |
+| `@EnumList` / `@EnumSet` | 引き続き使用可能。enum コレクションは指定なしでも変換される |
+| `@Loader(MyLoader::class)` | 組み込み変換の前に、null ではない入力を変換する |
+| `@Warn("message")` | 処理後の値が null なら、logger がある場合に警告を出す |
+
+## 項目を検証する
+
+```kotlin
+import net.ririfa.yacla.annotation.NotBlank
+import net.ririfa.yacla.annotation.Range
+
+data class Credentials(
+    @NotBlank val token: String,
+    @Range(min = 1, max = 60) val timeoutSeconds: Int = 10
+)
+```
+
+`token` は non-null でデフォルト値がないため必須です。`@NotBlank` は空白だけの文字列を拒否します。nullable な token では null 許容とデフォルト値を意図的に設計してください。`@NotBlank` 単独では必須項目になりません。
+
+アノテーションはマッピング時の入力値を検証します。省略された引数のコンストラクターデフォルト値は、別途検証されません。
+
+## カスタムフィールドローダー
+
+```kotlin
+import net.ririfa.yacla.annotation.Loader
+import net.ririfa.yacla.loader.FieldLoader
+
+class TrimLoader : FieldLoader {
+    override fun load(raw: Any?): Any? = raw?.toString()?.trim()
+}
+
+data class NamedConfig(
+    @Loader(TrimLoader::class) val name: String? = null
+)
+```
+
+ローダーは、引数なしのコンストラクターを用意するなど、Kotlin reflection で生成可能にしてください。入力が欠落している場合や null の場合は呼ばれません。
+
+## 処理順
+
+カスタムローダー、組み込み型変換、`@BlankToNull`、`@NotBlank`、`@Range`、`@SetOf`、`@Warn` の順です。その後にコンストラクターのデフォルト値と null 許容を解決するため、デフォルト値を選ぶ前に警告が出ることがあります。

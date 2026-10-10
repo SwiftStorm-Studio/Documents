@@ -1,0 +1,56 @@
+---
+title: 多言語のデフォルト設定
+description: 言語別の初期設定を選択し、単一または複数のファイルに出力します。
+---
+
+## リソースの配置
+
+```text
+src/main/resources/defaults/lang/en.yml
+src/main/resources/defaults/lang/ja.yml
+src/main/resources/defaults/lang/ja_JP.yml
+```
+
+`fromResource(...)` にリソースのディレクトリを指定します。`pull(file)` は読み込み時に言語を解決して出力ファイルを選びます。既存の出力ファイルは残すため、言語選択によって既存の設定を翻訳するわけではありません。
+
+## 単一ファイル
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/lang/")
+    .parser(YamlParser())
+    .language("ja_JP")
+    .defaultLanguage("en")
+    .pull(Paths.get("config.yml"))
+    .load()
+```
+
+`.language(...)` を省略すると JVM のロケールを使います。フォールバックの初期値は `en` です。`ja_JP` では `ja_JP`、`ja`、フォールバック言語の候補の順に探します。`ja-JP` と `ja_JP` は両方指定でき、ハイフンはアンダースコアに正規化します。
+
+YAML は各候補について `yml`、`yaml` の順に探し、JSON は `json` を探します。選択言語・フォールバックのリソースがなければ、試したパスを含む例外になります。
+
+`pull("ja", file)` は言語指定と出力設定をまとめて行います。`systemLanguage()` で JVM の言語に戻せます。
+
+## 複数ファイル
+
+```kotlin
+import net.ririfa.yacla.LanguageOutputMode
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/lang/")
+    .parser(YamlParser())
+    .language("ja")
+    .defaultLanguage("en")
+    .languageOutputMode(LanguageOutputMode.MULTIPLE_FILES)
+    .outputLanguages("en", "ja")
+    .pull(Paths.get("config.yml"))
+    .load()
+```
+
+存在しない `config_en.yml` と `config_ja.yml` を出力し、日本語のファイルを読み込みます。出力対象には指定した言語、選択言語、フォールバック言語を含めます。リソースがない言語はフォールバックを使い、解決結果が同じ出力は重複させません。ファイル名の言語部分は実際に解決したリソースの言語です。
+
+自動更新と手動更新は、読み込む対象として選んだファイルに適用します。他の出力ファイルは初回に存在しなければコピーしますが、1 つのローダーですべてを更新するわけではありません。

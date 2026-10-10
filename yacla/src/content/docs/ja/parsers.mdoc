@@ -1,0 +1,62 @@
+---
+title: パーサーと拡張
+description: ドキュメント単位のパーサー契約と、カスタム更新戦略。
+---
+
+## 組み込みパーサー
+
+| パーサー | モジュール | 拡張子 | デフォルト戦略 |
+| --- | --- | --- | --- |
+| `YamlParser` | `yacla-yaml` | `yml`, `yaml` | `YamlUpdateStrategy` |
+| `JsonParser` | `yacla-json` | `json` | `JsonUpdateStrategy` |
+
+パーサーはドキュメントの Map を扱います。オブジェクトの構築とアノテーションの検証は、core が別に担当します。
+
+## パーサーの契約
+
+```kotlin
+import net.ririfa.yacla.loader.UpdateStrategy
+import java.io.InputStream
+import java.io.OutputStream
+
+interface ConfigParser {
+    val supportedExtensions: Set<String>
+    val defaultUpdateStrategy: UpdateStrategy?
+        get() = null
+
+    fun parse(input: InputStream): Map<String, Any?>
+    fun write(output: OutputStream, config: Map<String, Any?>)
+}
+```
+
+実際のインターフェースは `net.ririfa.yacla.parser.ConfigParser` です。ルートは文字列キーのマッピングである必要があります。値には null、文字列、Boolean、数値、List、ネストしたマッピングを使えます。
+
+成功時も失敗時も、呼び出し元が所有するストリームを閉じてはいけません。テキスト出力は UTF-8 です。close と flush は呼び出し元が管理します。
+
+```kotlin
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Files
+import java.nio.file.Paths
+
+Files.newOutputStream(Paths.get("export.yml")).use { output ->
+    YamlParser().write(output, mapOf("version" to "1.0.0", "enabled" to true))
+}
+```
+
+`write(...)` は設定オブジェクトではなくドキュメントの Map を受け取ります。通常の書き出しと、YAML 更新戦略によるコメントを扱う更新処理は別の経路です。
+
+## 別の形式を追加する
+
+対象形式の読み書きを行う `ConfigParser` を実装し、ビルダーの `parser(...)` で選びます。多言語リソースの解決に使う拡張子も提供してください。`defaultUpdateStrategy` が null のままなら、その形式のデフォルト更新動作はありません。
+
+## カスタム更新戦略
+
+`net.ririfa.yacla.loader.UpdateStrategy` は次を定義します。
+
+```kotlin
+fun updateIfNeeded(context: UpdateContext): Boolean
+```
+
+`UpdateContext` は `net.ririfa.yacla.loader.util` にあり、パーサー、対象ファイル、リソースパス、任意の logger を提供します。ファイルを変更した場合だけ true を返してください。ビルダーの `updateStrategy(...)`、共通設定の `LoaderSettings.updateStrategy`、パーサーのデフォルトプロパティから実装を選べます。
+
+手動更新では `loader.config` は更新されません。更新成功後の再読み込みは呼び出し元が行います。

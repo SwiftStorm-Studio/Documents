@@ -1,0 +1,62 @@
+---
+title: Parsers & Extensions
+description: Document-level parser contracts and custom update strategies.
+---
+
+## Built-in parsers
+
+| Parser | Module | Extensions | Default strategy |
+| --- | --- | --- | --- |
+| `YamlParser` | `yacla-yaml` | `yml`, `yaml` | `YamlUpdateStrategy` |
+| `JsonParser` | `yacla-json` | `json` | `JsonUpdateStrategy` |
+
+Parsers work on document maps. Object construction and annotation validation are handled separately by core.
+
+## Parser contract
+
+```kotlin
+import net.ririfa.yacla.loader.UpdateStrategy
+import java.io.InputStream
+import java.io.OutputStream
+
+interface ConfigParser {
+    val supportedExtensions: Set<String>
+    val defaultUpdateStrategy: UpdateStrategy?
+        get() = null
+
+    fun parse(input: InputStream): Map<String, Any?>
+    fun write(output: OutputStream, config: Map<String, Any?>)
+}
+```
+
+The actual interface is `net.ririfa.yacla.parser.ConfigParser`. The root must be a mapping with string keys. Supported values include null, strings, booleans, numbers, lists, and nested mappings.
+
+Implementations must leave caller-owned streams open on success and failure. Text output uses UTF-8. The caller controls closing and flushing.
+
+```kotlin
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Files
+import java.nio.file.Paths
+
+Files.newOutputStream(Paths.get("export.yml")).use { output ->
+    YamlParser().write(output, mapOf("version" to "1.0.0", "enabled" to true))
+}
+```
+
+`write(...)` receives a document map, not an arbitrary config object. Ordinary parser writing is separate from the YAML strategy's comment-aware update path.
+
+## Add another format
+
+Implement `ConfigParser` using the format's document parser and writer, then select it with the loader builder's `parser(...)`. Supply extensions for localized resource resolution. Leaving `defaultUpdateStrategy` null means the format has no default update behavior.
+
+## Custom update strategy
+
+`net.ririfa.yacla.loader.UpdateStrategy` defines:
+
+```kotlin
+fun updateIfNeeded(context: UpdateContext): Boolean
+```
+
+`UpdateContext` is in `net.ririfa.yacla.loader.util` and provides the parser, target file, resource path, and optional logger. Return true only when the target file changed. Select your implementation with builder `updateStrategy(...)`, shared `LoaderSettings.updateStrategy`, or the parser's default property.
+
+A manual update does not refresh `loader.config`; the caller reloads after a successful update.

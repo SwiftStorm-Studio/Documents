@@ -1,0 +1,35 @@
+---
+title: Upgrading to 4.2.0
+description: API changes and stricter configuration conversion in Yacla 4.2.0.
+---
+
+## Update dependencies together
+
+Use `4.2.0` for core and all selected format modules, and recompile consumers against the new API.
+
+## Removed registry
+
+`UpdateStrategyRegistry` has been removed. Replace global registrations with a parser's `defaultUpdateStrategy`, builder `updateStrategy(...)`, or shared `LoaderSettings.updateStrategy`.
+
+Builder `updateStrategy(null)` explicitly disables updates. A null strategy in shared settings uses the parser's default instead.
+
+## Custom parsers and builders
+
+- Custom parsers must return `Map<String, Any?>` from `parse(...)`.
+- Implement `write(OutputStream, Map<String, Any?>)` and leave caller-owned streams open.
+- Replace direct object writing with document maps.
+- Custom `ConfigLoaderBuilder` implementations must implement `updateStrategy(UpdateStrategy?)`.
+
+## JSON dependency
+
+The JSON module no longer depends on Jackson's Kotlin module: parsing works on document maps. Applications using that transitive dependency for their own Jackson object mapping must declare it themselves.
+
+## Fix invalid configurations
+
+Present invalid values no longer silently use defaults. Unknown enum elements are rejected instead of skipped. Explicit null for a non-null field fails even when a default exists. Integer fractions, overflow, non-finite floats, invalid booleans, and invalid collection elements cause conversion errors.
+
+Review [mapping and validation](/yacla/mapping/) and correct affected files before loading them.
+
+## File compatibility
+
+YAML and JSON file formats remain supported. No data-format migration is required. Existing `Yacla.yaml`, `Yacla.json`, builder entry points, and language selection methods remain available. The stricter validation rules can still require edits to previously accepted invalid values.

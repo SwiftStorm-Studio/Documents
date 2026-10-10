@@ -1,0 +1,73 @@
+---
+title: 読み込みと再読み込み
+description: 設定の直接取得、ローダーの保持、ビルダー API の使い分け。
+---
+
+## 設定オブジェクトとローダー
+
+`Yacla.yaml<T>()` と `Yacla.json<T>()` は `T` を返します。`autoUpdate` の初期値は `false`、logger の初期値は null です。
+
+再読み込みが必要なら `ConfigLoader<T>` を保持します。
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.yamlLoader
+import java.nio.file.Paths
+
+val loader = Yacla.yamlLoader<AppConfig>(
+    resource = "/defaults/config.yml",
+    file = Paths.get("config.yml"),
+    autoUpdate = true
+)
+
+val initialConfig = loader.config
+loader.reload()
+val refreshedConfig = loader.config
+```
+
+`reload()` はファイルを再読み込みして、ローダーが保持する設定を新しいスナップショットに置き換えます。先に取得したオブジェクトは古いスナップショットのままです。再読み込み自体は更新チェックを行いません。
+
+## ビルダー
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/config.yml")
+    .toFile(Paths.get("config.yml"))
+    .parser(YamlParser())
+    .autoUpdateIfOutdated(true)
+    .load()
+```
+
+通常の読み込みでは `load()` の前にリソース、出力ファイル、パーサーを指定します。[多言語の初期設定](/yacla/ja/localization/)では `toFile(...)` の代わりに `pull(...)` を使います。
+
+形式別の DSL ではパーサーが設定済みです。
+
+```kotlin
+val loader = Yacla.yamlLoader<AppConfig> {
+    fromResource("/defaults/config.yml")
+    toFile(Paths.get("config.yml"))
+    autoUpdateIfOutdated(true)
+}
+```
+
+## ライフサイクル
+
+| メンバー | 動作 |
+| --- | --- |
+| `config` | 現在のメモリ上の設定を返す |
+| `reload()` | ファイルを再度パース・検証し、ローダーを返す |
+| `updateConfig()` | リソースとの更新チェック・マージを行い、ファイルを変更したか返す |
+
+手動更新が成功したら `reload()` でファイルの変更を読み込んでください。ファイルの自動監視機能はありません。
+
+## ファイルを使わずデフォルト値を取得する
+
+```kotlin
+val defaults = Yacla.fillByDefault<AppConfig>()
+```
+
+引数なしで Kotlin のプライマリコンストラクターを直接呼び出します。全引数にデフォルト値が必要です。ファイル操作、パース、アノテーションの検証は行いません。

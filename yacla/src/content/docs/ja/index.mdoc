@@ -1,0 +1,33 @@
+---
+title: Yacla
+description: Kotlin・Java アプリケーション向けの型安全な YAML・JSON 設定ローダー。
+---
+
+**Yet Another Config Loading API** — Yacla は YAML・JSON の設定を Kotlin クラスのプライマリコンストラクターにマッピングするライブラリです。このドキュメントは、現在のソースのバージョン **4.2.0** を対象にしています。
+
+## Yacla が扱うこと
+
+- 設定ファイルがない場合に、同梱リソースから初期設定をコピーします。
+- キー、ネストしたオブジェクト、コレクション、enum、Kotlin のデフォルト値を扱います。
+- アノテーションによる検証を行い、変換エラーにはフィールドのパスを含めます。
+- 新しいデフォルト設定を、ユーザーの値を残してマージします。
+- JVM の言語または指定した言語に合わせて、初期設定のリソースを選びます。
+
+## API を選ぶ
+
+| API | 用途 |
+| --- | --- |
+| `Yacla.yaml<T>()` / `Yacla.json<T>()` | 設定オブジェクトを直接取得する |
+| `yamlLoader<T>()` / `jsonLoader<T>()` | 手動更新・再読み込み用にローダーを保持する |
+| `Yacla.loader<T>()` | パーサー、更新戦略、言語設定を指定する |
+| `Yacla.withDefaults(...)` | 複数のローダーで共通の設定を使う |
+
+## ドキュメント構成
+
+まずは[はじめに](/yacla/ja/getting-started/)から読み、[マッピングと検証](/yacla/ja/mapping/)、[設定ファイルの更新](/yacla/ja/updates/)、[多言語のデフォルト設定](/yacla/ja/localization/)へ進んでください。
+
+Java 17 以上が必要です。設定クラスには Kotlin のプライマリコンストラクターが必要で、Java アプリケーションからは Kotlin で定義した設定クラスを Java 向けビルダーで読み込めます。Java records は現在未対応です。
+
+ライセンスは MIT です。
+
+[Read the English overview](/yacla/)

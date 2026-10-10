@@ -1,0 +1,93 @@
+---
+title: Getting Started
+description: Install Yacla and load your first YAML or JSON configuration.
+---
+
+## Install
+
+Use Java 17+ and the same version for all Yacla modules. Add core and the format modules you need to your Gradle Kotlin DSL build:
+
+```kotlin
+repositories {
+    maven("https://repo.ririfa.net/maven2")
+}
+
+dependencies {
+    implementation("net.ririfa:yacla-core:4.2.0")
+    implementation("net.ririfa:yacla-yaml:4.2.0")
+    // Add this if you also load JSON:
+    implementation("net.ririfa:yacla-json:4.2.0")
+}
+```
+
+## Define the config
+
+```kotlin
+import net.ririfa.yacla.annotation.Key
+import net.ririfa.yacla.annotation.Range
+
+data class AppConfig(
+    val version: String = "1.0.0",
+    @Key("server-port")
+    @Range(min = 1, max = 65535)
+    val port: Int = 8080,
+    val debug: Boolean = false
+)
+```
+
+## Bundle the default resource
+
+Create `src/main/resources/defaults/config.yml` in your application:
+
+```yaml
+version: "1.0.0"
+server-port: 8080
+debug: false
+```
+
+The document version describes your application's config schema. It is independent of Yacla's library version.
+
+## Load
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.yaml
+import java.nio.file.Paths
+
+val config = Yacla.yaml<AppConfig>(
+    resource = "/defaults/config.yml",
+    file = Paths.get("config.yml"),
+    autoUpdate = true
+)
+
+println(config.port)
+```
+
+If the file does not exist, Yacla creates missing parent directories and copies the classpath resource. Existing files are not overwritten by the initial copy. With `autoUpdate = true`, a newer resource version is merged before constructing the config.
+
+Relative file paths are resolved from the application's working directory. The resource path refers to the classpath, not a disk path.
+
+## Use JSON
+
+Bundle `src/main/resources/defaults/config.json`:
+
+```json
+{
+  "version": "1.0.0",
+  "server-port": 8080,
+  "debug": false
+}
+```
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.json.json
+import java.nio.file.Paths
+
+val config = Yacla.json<AppConfig>(
+    resource = "/defaults/config.json",
+    file = Paths.get("config.json")
+)
+```
+
+[Continue to loading and reloading](/yacla/loading/).

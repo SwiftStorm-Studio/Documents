@@ -1,0 +1,56 @@
+---
+title: Localized Defaults
+description: Select default resources by language and output one or several configuration files.
+---
+
+## Resource layout
+
+```text
+src/main/resources/defaults/lang/en.yml
+src/main/resources/defaults/lang/ja.yml
+src/main/resources/defaults/lang/ja_JP.yml
+```
+
+Use a resource directory with `fromResource(...)`. `pull(file)` resolves the language at load time and chooses the output file. Existing output files are retained; selecting a language does not translate an existing file.
+
+## One output file
+
+```kotlin
+import net.ririfa.yacla.Yacla
+import net.ririfa.yacla.yaml.YamlParser
+import java.nio.file.Paths
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/lang/")
+    .parser(YamlParser())
+    .language("ja_JP")
+    .defaultLanguage("en")
+    .pull(Paths.get("config.yml"))
+    .load()
+```
+
+Without `.language(...)`, the JVM locale is used. The default fallback is `en`. For `ja_JP`, resolution tries `ja_JP` then `ja`, followed by fallback-language candidates. Both `ja-JP` and `ja_JP` inputs are accepted; hyphens are normalized to underscores.
+
+For YAML, each candidate tries `yml` then `yaml`. JSON uses `json`. If no selected or fallback resource exists, loading fails with the tried paths.
+
+`pull("ja", file)` combines explicit language selection and output configuration. `systemLanguage()` resets selection to the JVM locale.
+
+## Multiple files
+
+```kotlin
+import net.ririfa.yacla.LanguageOutputMode
+
+val loader = Yacla.loader<AppConfig>()
+    .fromResource("/defaults/lang/")
+    .parser(YamlParser())
+    .language("ja")
+    .defaultLanguage("en")
+    .languageOutputMode(LanguageOutputMode.MULTIPLE_FILES)
+    .outputLanguages("en", "ja")
+    .pull(Paths.get("config.yml"))
+    .load()
+```
+
+This writes missing `config_en.yml` and `config_ja.yml` and loads the selected Japanese file. Resolution includes requested output languages, the selected language, and the fallback language. Missing languages resolve to the fallback resource; duplicate resolved outputs are removed. Suffixes use the resolved resource's language.
+
+Automatic and manual updates apply to the active selected file. The other output files are initially copied if missing, but are not all updated by the active loader.

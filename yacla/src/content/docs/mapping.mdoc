@@ -1,0 +1,53 @@
+---
+title: Mapping & Validation
+description: Key resolution, nested types, defaults, nullability, and strict conversion rules.
+---
+
+## Key resolution
+
+Keys are matched case-insensitively. For each constructor parameter, Yacla tries an explicit `@Key`, the parameter name, snake_case, and kebab-case, in that order. For `apiKey`, the automatic candidates are `apikey`, `api_key`, and `api-key`.
+
+An explicit key is preferred, but automatic candidates are still tried if it is absent. Unknown document keys are not constructor arguments; they can remain in the file.
+
+## Defaults and nulls
+
+| Input | Result |
+| --- | --- |
+| Missing field with a Kotlin default | Uses the constructor default |
+| Missing nullable field without a default | Uses null |
+| Missing required non-null field | Throws `YaclaConfigException` |
+| Explicit null for a nullable field | Keeps null, even if a default exists |
+| Explicit null for a non-null field | Throws, even if a default exists |
+
+`@BlankToNull` and `@SetOf` can produce null from a non-null raw value. In that case a constructor default can still be selected.
+
+## Nested objects and collections
+
+```kotlin
+enum class Mode { DEVELOPMENT, PRODUCTION }
+
+data class ServerConfig(val host: String, val port: Int = 8080)
+
+data class AppConfig(
+    val servers: List<ServerConfig> = emptyList(),
+    val modes: Set<Mode> = emptySet(),
+    val limits: Map<String, Int> = emptyMap()
+)
+```
+
+```yaml
+servers:
+  - host: localhost
+    port: 8080
+modes: [development, production]
+limits:
+  requests: 100
+```
+
+List, set, and map elements are converted recursively. Nested classes need primary constructors. Enum matching is case-insensitive, including collection elements; `@EnumList` and `@EnumSet` are optional. Scalar values supplied for a list or set are treated as a single element.
+
+## Conversion failures
+
+Invalid values cause `YaclaConfigException` instead of silently using defaults or dropping elements. Integer conversion rejects fractions and overflow. Float and double conversion rejects non-finite values. Booleans accept `true` and `false` case-insensitively.
+
+Errors identify the constructor field path, for example `servers[0].port`. A default does not rescue a present but invalid value. Correct the source file before reloading.
